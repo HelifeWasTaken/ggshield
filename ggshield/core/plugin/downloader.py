@@ -139,9 +139,9 @@ class PluginDownloader:
             # Verify signature
             sig_info = verify_wheel_signature(wheel_path, signature_mode)
 
-            # Use GitGuardian API as default source if not provided
+            # Use platform as default source if not provided
             if source is None:
-                source = PluginSource(type=PluginSourceType.GITGUARDIAN_API)
+                source = PluginSource(type=PluginSourceType.PLATFORM)
 
             # Sync trust record before writing the manifest so a trust failure
             # cannot leave an orphaned manifest pointing at a wheel we remove
@@ -681,7 +681,7 @@ class PluginDownloader:
         source_data = manifest.get("source")
         if not source_data:
             # Legacy manifest without source tracking - assume GitGuardian API
-            return PluginSource(type=PluginSourceType.GITGUARDIAN_API)
+            return PluginSource(type=PluginSourceType.PLATFORM)
 
         try:
             return PluginSource.from_dict(source_data)

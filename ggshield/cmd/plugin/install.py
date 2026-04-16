@@ -65,7 +65,7 @@ def detect_source_type(plugin_source: str) -> PluginSourceType:
         return PluginSourceType.LOCAL_FILE
 
     # Default: assume it's a plugin name for GitGuardian API
-    return PluginSourceType.GITGUARDIAN_API
+    return PluginSourceType.PLATFORM
 
 
 @click.command()

@@ -549,8 +549,8 @@ class TestDetectSourceType:
 
     def test_detect_plugin_name(self) -> None:
         """Test plugin names default to GitGuardian API."""
-        assert detect_source_type("tokenscanner") == PluginSourceType.GITGUARDIAN_API
-        assert detect_source_type("my-plugin") == PluginSourceType.GITGUARDIAN_API
+        assert detect_source_type("tokenscanner") == PluginSourceType.PLATFORM
+        assert detect_source_type("my-plugin") == PluginSourceType.PLATFORM
 
 
 class TestInstallFromLocalWheel:

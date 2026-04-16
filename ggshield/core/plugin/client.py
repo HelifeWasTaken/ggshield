@@ -15,11 +15,18 @@ from ggshield.core.plugin.platform import PlatformInfo, get_platform_info
 class PluginSourceType(Enum):
     """Types of plugin sources."""
 
-    GITGUARDIAN_API = "gitguardian_api"
+    PLATFORM = "platform"  # GG platform API (old manifests may have "gitguardian_api")
     LOCAL_FILE = "local_file"
     URL = "url"
     GITHUB_RELEASE = "github_release"
     GITHUB_ARTIFACT = "github_artifact"
+
+    @classmethod
+    def _missing_(cls, value: object) -> Optional["PluginSourceType"]:
+        """Accept legacy manifest value written by the PoC (< v1.50)."""
+        if value == "gitguardian_api":
+            return cls.PLATFORM
+        return None
 
 
 @dataclass

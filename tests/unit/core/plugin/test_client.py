@@ -12,8 +12,21 @@ from ggshield.core.plugin.client import (
     PluginDownloadInfo,
     PluginInfo,
     PluginNotAvailableError,
+    PluginSourceType,
 )
 from ggshield.core.plugin.platform import PlatformInfo
+
+
+class TestPluginSourceType:
+    """Tests for PluginSourceType enum."""
+
+    def test_platform_value(self) -> None:
+        """PLATFORM enum has value 'platform'."""
+        assert PluginSourceType.PLATFORM.value == "platform"
+
+    def test_backward_compat_gitguardian_api(self) -> None:
+        """Legacy manifest value 'gitguardian_api' maps to PLATFORM."""
+        assert PluginSourceType("gitguardian_api") == PluginSourceType.PLATFORM
 
 
 class TestPluginInfo:

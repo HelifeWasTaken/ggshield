@@ -927,7 +927,7 @@ class TestGetPluginSource:
             source = downloader.get_plugin_source("testplugin")
 
         assert source is not None
-        assert source.type == PluginSourceType.GITGUARDIAN_API
+        assert source.type == PluginSourceType.PLATFORM
 
     def test_get_source_url(self, tmp_path: Path) -> None:
         """Test getting source for URL-installed plugin."""
@@ -1002,7 +1002,7 @@ class TestGetPluginSource:
             source = downloader.get_plugin_source("legacyplugin")
 
         assert source is not None
-        assert source.type == PluginSourceType.GITGUARDIAN_API
+        assert source.type == PluginSourceType.PLATFORM
 
     def test_get_source_not_installed(self, tmp_path: Path) -> None:
         """Test getting source for non-installed plugin."""
@@ -1050,11 +1050,11 @@ class TestPluginSourceTypes:
 
     def test_source_minimal(self) -> None:
         """Test PluginSource with minimal fields."""
-        source = PluginSource(type=PluginSourceType.GITGUARDIAN_API)
+        source = PluginSource(type=PluginSourceType.PLATFORM)
 
         data = source.to_dict()
 
-        assert data == {"type": "gitguardian_api"}
+        assert data == {"type": "platform"}
 
 
 class TestDownloadFromUrlEdgeCases:

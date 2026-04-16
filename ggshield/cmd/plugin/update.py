@@ -141,9 +141,9 @@ def update_cmd(
     for name in plugins_to_process:
         source = downloader.get_plugin_source(name)
         if source is None:
-            # Legacy manifest or unknown source - try GitGuardian API
+            # Legacy manifest or unknown source - try platform
             gitguardian_plugins.append(name)
-        elif source.type == PluginSourceType.GITGUARDIAN_API:
+        elif source.type == PluginSourceType.PLATFORM:
             gitguardian_plugins.append(name)
         elif source.type == PluginSourceType.GITHUB_RELEASE:
             github_release_plugins.append(name)
@@ -187,7 +187,7 @@ def update_cmd(
                             "name": name,
                             "installed_version": installed_version,
                             "latest_version": latest_version,
-                            "source_type": PluginSourceType.GITGUARDIAN_API,
+                            "source_type": PluginSourceType.PLATFORM,
                         }
                     )
 
@@ -233,7 +233,7 @@ def update_cmd(
             for update in updates_available:
                 source_label = (
                     "GitGuardian"
-                    if update["source_type"] == PluginSourceType.GITGUARDIAN_API
+                    if update["source_type"] == PluginSourceType.PLATFORM
                     else "GitHub"
                 )
                 ui.display_info(
@@ -261,7 +261,7 @@ def update_cmd(
             # Check if it's non-updatable
             source = downloader.get_plugin_source(plugin_name)
             if source and source.type not in (
-                PluginSourceType.GITGUARDIAN_API,
+                PluginSourceType.PLATFORM,
                 PluginSourceType.GITHUB_RELEASE,
             ):
                 ui.display_error(
@@ -290,7 +290,7 @@ def update_cmd(
         try:
             updated = False
 
-            if source_type == PluginSourceType.GITGUARDIAN_API:
+            if source_type == PluginSourceType.PLATFORM:
                 assert plugin_api_client is not None
                 # Get download info from API
                 download_info = plugin_api_client.get_download_info(
