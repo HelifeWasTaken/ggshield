@@ -10,7 +10,7 @@ import re
 import shutil
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterator, Optional, Tuple
 
 import requests
@@ -28,11 +28,66 @@ from ggshield.core.plugin.signature import (
     SignatureVerificationMode,
     verify_wheel_signature,
 )
-from ggshield.core.plugin.trust import PluginTrustStore
+from ggshield.core.plugin.trust import PluginTrustStore, compute_file_sha256
 from ggshield.core.plugin.wheel_utils import WheelError, extract_wheel_metadata
 
 
 logger = logging.getLogger(__name__)
+
+
+HTTP_TIMEOUT_SECONDS = 30
+MAX_WHEEL_SIZE_BYTES = 256 * 1024 * 1024
+MAX_BUNDLE_SIZE_BYTES = 1 * 1024 * 1024
+
+
+def _assert_all_https(response: "requests.Response") -> None:
+    """Reject a response whose redirect chain went through non-HTTPS.
+
+    Protects against a trusted HTTPS origin redirecting through ``http://``
+    (a downgrade attack). ``requests`` follows redirects transparently, so
+    we inspect ``response.history`` + the final URL after the fact.
+    """
+    for hop in list(response.history) + [response]:
+        if not hop.url.startswith("https://"):
+            raise InsecureSourceError(
+                f"Refusing insecure redirect through {hop.url!r}"
+            )
+
+
+def _stream_to_file(
+    response: "requests.Response",
+    dest: Path,
+    max_bytes: int,
+    *,
+    hash_bytes: bool = False,
+) -> Optional[str]:
+    """Stream an HTTP response body to ``dest`` with a hard size cap.
+
+    When ``hash_bytes`` is True, also computes SHA256 in a single pass and
+    returns the hex digest; otherwise returns None. Raises ``DownloadError``
+    if the response body exceeds ``max_bytes``; the partial file is then
+    removed before the exception propagates.
+    """
+    sha256_hash = hashlib.sha256() if hash_bytes else None
+    written = 0
+    try:
+        with open(dest, "wb") as f:
+            for chunk in response.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                written += len(chunk)
+                if written > max_bytes:
+                    raise DownloadError(
+                        f"Response body exceeded maximum size of {max_bytes} bytes"
+                    )
+                f.write(chunk)
+                if sha256_hash is not None:
+                    sha256_hash.update(chunk)
+    except BaseException:
+        if dest.exists():
+            dest.unlink()
+        raise
+    return sha256_hash.hexdigest() if sha256_hash is not None else None
 
 
 def get_signature_label(
@@ -104,6 +159,7 @@ class PluginDownloader:
         plugin_name: str,
         source: Optional[PluginSource] = None,
         signature_mode: SignatureVerificationMode = SignatureVerificationMode.STRICT,
+        bundle_bytes: Optional[bytes] = None,
     ) -> Path:
         """Install a plugin wheel from a byte stream.
 
@@ -112,12 +168,12 @@ class PluginDownloader:
             chunks: Iterator of raw bytes (from streaming HTTP response or test fixture).
             plugin_name: Name used for the local plugin directory.
             source: Manifest source record. Defaults to PluginSourceType.PLATFORM.
-            signature_mode: Sigstore verification mode. Platform streams don't
-                currently carry a signature bundle (the /download endpoint
-                proxies wheel bytes only), so verification runs against
-                whatever bundle file the caller may have placed alongside;
-                STRICT mode will therefore fail for pure platform streams
-                until the backend also proxies bundles.
+            signature_mode: Sigstore verification mode.
+            bundle_bytes: Optional sigstore bundle bytes fetched by the
+                caller (typically via ``PluginAPIClient.download_signature_bundle``
+                using the ``X-Plugin-Signature-URL`` header). Written next
+                to the wheel before verification runs, so STRICT mode
+                succeeds when the platform exposes a signature.
 
         Returns:
             Path to the installed wheel file.
@@ -148,17 +204,16 @@ class PluginDownloader:
                 raise ChecksumMismatchError(download_info.sha256, computed_hash)
 
             # Remove any stale bundle sidecars before moving the new wheel
-            # into place.
+            # into place, then drop the fresh one (if provided) so
+            # `verify_wheel_signature` below can find it.
             self._remove_bundle_files(wheel_path)
             temp_path.rename(wheel_path)
+            if bundle_bytes is not None:
+                bundle_path = wheel_path.parent / (wheel_path.name + ".sigstore")
+                bundle_path.write_bytes(bundle_bytes)
 
-            # Verify signature against whatever bundle is on disk. The
-            # platform /download endpoint doesn't proxy bundles yet, so
-            # platform streams verify as unsigned unless the caller
-            # arranged a bundle separately.
             sig_info = verify_wheel_signature(wheel_path, signature_mode)
 
-            # Use platform as default source if not provided
             if source is None:
                 source = PluginSource(type=PluginSourceType.PLATFORM)
 
@@ -209,7 +264,6 @@ class PluginDownloader:
             DownloadError: If installation fails.
             SignatureVerificationError: In STRICT mode when signature is invalid.
         """
-        # Extract metadata from wheel
         try:
             metadata = extract_wheel_metadata(wheel_path)
         except WheelError as e:
@@ -219,27 +273,25 @@ class PluginDownloader:
         version = metadata.version
         self._validate_plugin_name(plugin_name)
 
-        # Create plugin directory
+        # Verify on the caller-provided wheel path — the bundle (if any)
+        # lives alongside the source wheel. Copying first would leave a
+        # rejected wheel under plugins/<name>/ on STRICT failure.
+        sig_info = verify_wheel_signature(wheel_path, signature_mode)
+
+        sha256 = compute_file_sha256(wheel_path)
+
         plugin_dir = self.plugins_dir / plugin_name
         plugin_dir.mkdir(parents=True, exist_ok=True)
 
-        # Copy wheel to plugin directory
         dest_wheel_path = plugin_dir / wheel_path.name
         self._remove_bundle_files(dest_wheel_path)
         shutil.copy2(wheel_path, dest_wheel_path)
 
-        # Copy bundle if it exists alongside the wheel
         from ggshield.core.plugin.signature import get_bundle_path
 
         bundle_path = get_bundle_path(wheel_path)
         if bundle_path is not None:
             shutil.copy2(bundle_path, plugin_dir / bundle_path.name)
-
-        # Verify signature
-        sig_info = verify_wheel_signature(dest_wheel_path, signature_mode)
-
-        # Compute SHA256
-        sha256 = self._compute_sha256(dest_wheel_path)
 
         # Create source tracking
         source = PluginSource(
@@ -295,36 +347,33 @@ class PluginDownloader:
         if not url.startswith("https://"):
             raise DownloadError(f"Invalid URL scheme: {url}")
 
-        # Download to temp file
         with tempfile.TemporaryDirectory() as temp_dir:
-            # Extract filename from URL
-            filename = url.split("/")[-1].split("?")[0]
-            if not filename.endswith(".whl"):
+            raw_filename = url.split("/")[-1].split("?")[0]
+            filename = PurePosixPath(raw_filename).name
+            if not filename or filename in {".", ".."} or not filename.endswith(".whl"):
                 filename = "plugin.whl"
 
             temp_wheel_path = Path(temp_dir) / filename
 
             try:
                 logger.info("Downloading from %s...", url)
-                response = requests.get(url, stream=True)
+                response = requests.get(
+                    url, stream=True, timeout=HTTP_TIMEOUT_SECONDS
+                )
+                _assert_all_https(response)
                 response.raise_for_status()
 
-                sha256_hash = hashlib.sha256()
-                with open(temp_wheel_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                        sha256_hash.update(chunk)
+                computed_hash = _stream_to_file(
+                    response, temp_wheel_path, MAX_WHEEL_SIZE_BYTES, hash_bytes=True
+                )
+                assert computed_hash is not None
 
-                computed_hash = sha256_hash.hexdigest()
-
-                # Verify checksum if provided
                 if sha256 and computed_hash.lower() != sha256.lower():
                     raise ChecksumMismatchError(sha256, computed_hash)
 
             except requests.RequestException as e:
                 raise DownloadError(f"Failed to download from URL: {e}") from e
 
-            # Extract metadata
             try:
                 metadata = extract_wheel_metadata(temp_wheel_path)
             except WheelError as e:
@@ -334,7 +383,15 @@ class PluginDownloader:
             version = metadata.version
             self._validate_plugin_name(plugin_name)
 
-            # Create plugin directory and copy wheel
+            # Fetch sigstore bundle alongside the wheel in the temp dir so
+            # verification runs before we touch the final plugin directory.
+            self._download_url_bundle(url, temp_wheel_path)
+
+            # Verify before we place anything in the final destination so a
+            # STRICT-mode signature failure can't leave a rejected wheel on
+            # disk under plugins/<name>/.
+            sig_info = verify_wheel_signature(temp_wheel_path, signature_mode)
+
             plugin_dir = self.plugins_dir / plugin_name
             plugin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -342,13 +399,13 @@ class PluginDownloader:
             self._remove_bundle_files(dest_wheel_path)
             shutil.copy2(temp_wheel_path, dest_wheel_path)
 
-        # Try downloading the signature bundle alongside the wheel
-        self._download_url_bundle(url, dest_wheel_path)
+            # Copy the bundle too if one was fetched.
+            for ext in (".sigstore", ".sigstore.json"):
+                bundle_src = temp_wheel_path.parent / (temp_wheel_path.name + ext)
+                if bundle_src.exists():
+                    shutil.copy2(bundle_src, plugin_dir / bundle_src.name)
+                    break
 
-        # Verify signature
-        sig_info = verify_wheel_signature(dest_wheel_path, signature_mode)
-
-        # Create source tracking
         source = PluginSource(
             type=PluginSourceType.URL,
             url=url,
@@ -387,26 +444,31 @@ class PluginDownloader:
         Returns:
             Tuple of (plugin_name, version, installed_wheel_path).
         """
-        # Extract repo info from URL for source tracking
         github_repo = self._extract_github_repo(url)
 
-        # Download using standard URL method
         plugin_name, version, wheel_path = self.download_from_url(
             url, sha256, signature_mode=signature_mode
         )
 
-        # Update source to track GitHub release
+        # Upgrade the provenance record from "url" to "github_release". Use
+        # the same tmp+replace path as _write_manifest so a crash mid-write
+        # can't corrupt the manifest.
         manifest_path = self.plugins_dir / plugin_name / "manifest.json"
         manifest = json.loads(manifest_path.read_text())
-
-        source = PluginSource(
+        manifest["source"] = PluginSource(
             type=PluginSourceType.GITHUB_RELEASE,
             url=url,
             github_repo=github_repo,
             sha256=manifest.get("sha256"),
-        )
-        manifest["source"] = source.to_dict()
-        manifest_path.write_text(json.dumps(manifest, indent=2))
+        ).to_dict()
+
+        tmp_path = manifest_path.with_suffix(".json.tmp")
+        try:
+            tmp_path.write_text(json.dumps(manifest, indent=2))
+            tmp_path.replace(manifest_path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
         return plugin_name, version, wheel_path
 
@@ -471,12 +533,14 @@ class PluginDownloader:
                         "X-GitHub-Api-Version": "2022-11-28",
                     },
                     stream=True,
+                    timeout=HTTP_TIMEOUT_SECONDS,
                 )
+                _assert_all_https(response)
                 response.raise_for_status()
 
-                with open(artifact_zip_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
+                _stream_to_file(
+                    response, artifact_zip_path, MAX_WHEEL_SIZE_BYTES
+                )
 
             except requests.RequestException as e:
                 raise GitHubArtifactError(f"Failed to download artifact: {e}") from e
@@ -491,20 +555,24 @@ class PluginDownloader:
             except Exception as e:
                 raise GitHubArtifactError(f"Failed to extract artifact: {e}") from e
 
-            # Find wheel file in extracted contents
-            wheel_files = list(extract_dir.glob("**/*.whl"))
+            # Sort to ensure deterministic wheel selection when multiple
+            # wheels are shipped in the same artifact — without this, the
+            # order depends on filesystem traversal and an attacker-shaped
+            # artifact could cause different machines to pick different
+            # wheels.
+            wheel_files = sorted(extract_dir.glob("**/*.whl"))
             if not wheel_files:
                 raise GitHubArtifactError("No wheel file found in artifact")
 
             if len(wheel_files) > 1:
                 logger.warning(
-                    "Multiple wheel files found in artifact, using first: %s",
+                    "Multiple wheel files found in artifact, using first "
+                    "(alphabetical): %s",
                     wheel_files[0].name,
                 )
 
             temp_wheel_path = wheel_files[0]
 
-            # Extract metadata
             try:
                 metadata = extract_wheel_metadata(temp_wheel_path)
             except WheelError as e:
@@ -514,7 +582,12 @@ class PluginDownloader:
             version = metadata.version
             self._validate_plugin_name(plugin_name)
 
-            # Create plugin directory and copy wheel
+            # Verify on the temp path before we touch plugin_dir — a STRICT
+            # signature failure must not leave a rejected wheel on disk.
+            sig_info = verify_wheel_signature(temp_wheel_path, signature_mode)
+
+            sha256 = compute_file_sha256(temp_wheel_path)
+
             plugin_dir = self.plugins_dir / plugin_name
             plugin_dir.mkdir(parents=True, exist_ok=True)
 
@@ -522,20 +595,12 @@ class PluginDownloader:
             self._remove_bundle_files(dest_wheel_path)
             shutil.copy2(temp_wheel_path, dest_wheel_path)
 
-            # Copy bundle alongside the wheel if present in the artifact
             for ext in (".sigstore", ".sigstore.json"):
                 bundle_src = temp_wheel_path.parent / (temp_wheel_path.name + ext)
                 if bundle_src.exists():
                     shutil.copy2(bundle_src, plugin_dir / bundle_src.name)
                     break
 
-            # Compute SHA256
-            sha256 = self._compute_sha256(dest_wheel_path)
-
-        # Verify signature
-        sig_info = verify_wheel_signature(dest_wheel_path, signature_mode)
-
-        # Create source tracking
         source = PluginSource(
             type=PluginSourceType.GITHUB_ARTIFACT,
             url=url,
@@ -678,11 +743,11 @@ class PluginDownloader:
             return None
 
         trusted_unsigned = False
-        wheel_path = self.get_wheel_path(plugin_name)
-        if wheel_path is not None:
+        stored_sha256 = manifest.get("sha256")
+        plugin_dir = self._resolve_plugin_dir(plugin_name)
+        if stored_sha256 and plugin_dir is not None:
             trusted_unsigned = self.trust_store.is_trusted(
-                wheel_path.parent.name,
-                self._compute_sha256(wheel_path),
+                plugin_dir.name, stored_sha256
             )
 
         return get_signature_label(manifest, trusted_unsigned=trusted_unsigned)
@@ -778,40 +843,6 @@ class PluginDownloader:
             signature_info.status.value,
         )
 
-    def _download_bundle(
-        self,
-        download_info: PluginDownloadInfo,
-        plugin_dir: Path,
-    ) -> Optional[Path]:
-        """Download the sigstore bundle for a wheel if a signature URL is available."""
-        if not download_info.signature_url:
-            return None
-
-        bundle_filename = download_info.filename + ".sigstore"
-        bundle_path = plugin_dir / bundle_filename
-
-        try:
-            logger.info("Downloading signature bundle...")
-            response = requests.get(
-                download_info.signature_url, stream=True, timeout=30
-            )
-            response.raise_for_status()
-
-            try:
-                with open(bundle_path, "wb") as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-            except BaseException:
-                # Remove any partial bundle left behind by a mid-stream error.
-                if bundle_path.exists():
-                    bundle_path.unlink()
-                raise
-
-            return bundle_path
-        except requests.RequestException as e:
-            logger.warning("Failed to download signature bundle: %s", e)
-            return None
-
     def _download_url_bundle(
         self, wheel_url: str, dest_wheel_path: Path
     ) -> Optional[Path]:
@@ -823,21 +854,17 @@ class PluginDownloader:
             bundle_url = wheel_url + ext
             bundle_path = dest_wheel_path.parent / (dest_wheel_path.name + ext)
             try:
-                response = requests.get(bundle_url, stream=True, timeout=30)
+                response = requests.get(
+                    bundle_url, stream=True, timeout=HTTP_TIMEOUT_SECONDS
+                )
+                _assert_all_https(response)
                 response.raise_for_status()
 
-                try:
-                    with open(bundle_path, "wb") as f:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                except BaseException:
-                    if bundle_path.exists():
-                        bundle_path.unlink()
-                    raise
+                _stream_to_file(response, bundle_path, MAX_BUNDLE_SIZE_BYTES)
 
                 logger.info("Downloaded signature bundle from %s", bundle_url)
                 return bundle_path
-            except requests.RequestException:
+            except (requests.RequestException, InsecureSourceError, DownloadError):
                 continue
 
         logger.debug("No signature bundle found at URL conventions for %s", wheel_url)
@@ -857,21 +884,21 @@ class PluginDownloader:
 
         self._remove_bundle_files(wheel_path)
 
-    def _compute_sha256(self, file_path: Path) -> str:
-        """Compute SHA256 hash of a file."""
-        sha256_hash = hashlib.sha256()
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(8192), b""):
-                sha256_hash.update(chunk)
-        return sha256_hash.hexdigest()
-
     def _extract_github_repo(self, url: str) -> Optional[str]:
         """Extract owner/repo from a GitHub URL."""
-        # Pattern: github.com/{owner}/{repo}/...
         match = re.match(r"https://github\.com/([^/]+)/([^/]+)", url)
-        if match:
-            return f"{match.group(1)}/{match.group(2)}"
-        return None
+        if not match:
+            return None
+        owner, repo = match.group(1), match.group(2)
+        if repo.endswith(".git"):
+            repo = repo[: -len(".git")]
+        # Reject path-traversal-like segments; the repo value is later
+        # interpolated into api.github.com URLs and stored in manifests.
+        if owner in {"", ".", ".."} or repo in {"", ".", ".."}:
+            return None
+        if "/" in owner or "/" in repo or "\\" in owner or "\\" in repo:
+            return None
+        return f"{owner}/{repo}"
 
     def _parse_github_artifact_url(self, url: str) -> Optional[Tuple[str, str, str]]:
         """

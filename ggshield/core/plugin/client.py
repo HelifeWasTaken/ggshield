@@ -7,7 +7,9 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import PurePosixPath
 from typing import Any, Dict, Generator, Iterator, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 from pygitguardian import GGClient
@@ -18,10 +20,51 @@ from ggshield.core.plugin.platform import PlatformInfo, get_platform_info
 logger = logging.getLogger(__name__)
 
 
+HTTP_TIMEOUT_SECONDS = 30
+MAX_WHEEL_SIZE_BYTES = 256 * 1024 * 1024
+MAX_BUNDLE_SIZE_BYTES = 1 * 1024 * 1024
+
+
+def _assert_all_https(response: "requests.Response") -> None:
+    """Reject a response whose redirect chain went through non-HTTPS."""
+    for hop in list(response.history) + [response]:
+        if not hop.url.startswith("https://"):
+            raise PluginAPIError(
+                f"Refusing insecure redirect through {hop.url!r}"
+            )
+
+
+def _sanitize_wheel_filename(raw: str) -> str:
+    """Return a wheel filename safe to use as a single path segment.
+
+    Strips any path components the server may have included and rejects
+    values that would resolve outside the plugin directory (``..``, empty
+    segment, embedded NUL, trailing ``.whl`` missing).
+    """
+    name = PurePosixPath(raw).name
+    if not name or name in {".", ".."} or "\x00" in name or "\\" in name:
+        raise PluginAPIError(f"Server returned unsafe filename: {raw!r}")
+    return name
+
+
+def _iter_with_size_cap(
+    chunks: Iterator[bytes], max_bytes: int
+) -> Generator[bytes, None, None]:
+    """Yield chunks from ``chunks`` until ``max_bytes`` is exceeded."""
+    written = 0
+    for chunk in chunks:
+        written += len(chunk)
+        if written > max_bytes:
+            raise PluginAPIError(
+                f"Response body exceeded maximum size of {max_bytes} bytes"
+            )
+        yield chunk
+
+
 class PluginSourceType(Enum):
     """Types of plugin sources."""
 
-    PLATFORM = "platform"  # GG platform API (old manifests may have "gitguardian_api")
+    PLATFORM = "platform"
     LOCAL_FILE = "local_file"
     URL = "url"
     GITHUB_RELEASE = "github_release"
@@ -107,6 +150,10 @@ class PluginDownloadInfo:
     sha256: str      # from X-Plugin-SHA256 header
     version: str     # from X-Plugin-Version header
     size_bytes: int  # from Content-Length header
+    # Absolute URL of the sigstore bundle, from the X-Plugin-Signature-URL
+    # response header. None when the platform has no bundle for this
+    # artifact — STRICT verification then fails fast (as it should).
+    signature_url: Optional[str] = None
 
 
 class PluginAPIError(Exception):
@@ -133,6 +180,24 @@ class PluginsNotEnabledError(Exception):
     pass
 
 
+def _extract_server_detail(response: "requests.Response") -> Optional[str]:
+    """Return the server's ``detail`` field when available, else None.
+
+    Falls back to None on empty bodies, non-JSON responses, or JSON
+    shapes without a ``detail`` field — so callers can use their own
+    default message in those cases.
+    """
+    try:
+        body = response.json()
+    except (ValueError, requests.RequestException):
+        return None
+    if isinstance(body, dict):
+        detail = body.get("detail")
+        if isinstance(detail, str) and detail:
+            return detail
+    return None
+
+
 class PluginAPIClient:
     """Client for GitGuardian plugin API."""
 
@@ -153,7 +218,6 @@ class PluginAPIClient:
                     "platform": platform_info.os,
                     "arch": platform_info.arch,
                 },
-                headers=self._get_headers(),
             )
             if response.status_code == 404:
                 raise PluginsNotEnabledError()
@@ -163,7 +227,7 @@ class PluginAPIClient:
         except requests.RequestException as e:
             raise PluginAPIError(f"Failed to fetch plugins: {e}") from e
 
-        plugins_data = response.json()  # list, not a dict
+        plugins_data = response.json()
 
         return PluginCatalog(
             plugins=[
@@ -210,18 +274,33 @@ class PluginAPIClient:
             response = self.client.session.get(
                 f"{self.base_url}/{self.API_VERSION}/endpoints/plugins/{reference}/download",
                 params=params,
-                headers=self._get_headers(),
                 stream=True,
+                timeout=HTTP_TIMEOUT_SECONDS,
             )
-            if response.status_code == 403:
-                raise PluginNotAvailableError(reference)
-            if response.status_code == 404:
-                raise PluginNotAvailableError(reference, "Plugin or version not found")
+            _assert_all_https(response)
+            if response.status_code in (403, 404):
+                # Surface the server's `detail` (e.g. "No active release
+                # found for 'satori-python' version v0.32.0. Available
+                # versions: 0.32.0, …") rather than a hardcoded message.
+                # The server knows what went wrong and what's available;
+                # clients typically don't. Fall back to the previous
+                # generic strings when the body isn't JSON or lacks a
+                # detail field (defensive — shouldn't happen against a
+                # current backend).
+                detail = _extract_server_detail(response)
+                if not detail:
+                    detail = (
+                        "Plugin or version not found"
+                        if response.status_code == 404
+                        else None
+                    )
+                raise PluginNotAvailableError(reference, detail)
             response.raise_for_status()
 
             content_disposition = response.headers.get("Content-Disposition", "")
             match = re.search(r'filename="([^"]+)"', content_disposition)
-            filename = match.group(1) if match else f"{reference}.whl"
+            raw_filename = match.group(1) if match else f"{reference}.whl"
+            filename = _sanitize_wheel_filename(raw_filename)
 
             sha256 = response.headers.get("X-Plugin-SHA256")
             if not sha256:
@@ -234,13 +313,23 @@ class PluginAPIClient:
                     f"Server response missing X-Plugin-Version header for {reference}"
                 )
 
+            size_bytes = int(response.headers.get("Content-Length", 0))
+            if size_bytes > MAX_WHEEL_SIZE_BYTES:
+                raise PluginAPIError(
+                    f"Plugin wheel size {size_bytes} exceeds maximum "
+                    f"of {MAX_WHEEL_SIZE_BYTES} bytes"
+                )
+
             info = PluginDownloadInfo(
                 filename=filename,
                 sha256=sha256,
                 version=resolved_version,
-                size_bytes=int(response.headers.get("Content-Length", 0)),
+                size_bytes=size_bytes,
+                signature_url=response.headers.get("X-Plugin-Signature-URL") or None,
             )
-            yield info, response.iter_content(chunk_size=8192)
+            yield info, _iter_with_size_cap(
+                response.iter_content(chunk_size=65536), MAX_WHEEL_SIZE_BYTES
+            )
         except (PluginNotAvailableError, PluginAPIError):
             raise
         except requests.RequestException as e:
@@ -248,6 +337,59 @@ class PluginAPIClient:
         finally:
             if response is not None:
                 response.close()
+
+    def download_signature_bundle(self, signature_url: str) -> bytes:
+        """Fetch a sigstore bundle using the authenticated session.
+
+        The platform's ``X-Plugin-Signature-URL`` header points at our own
+        ``/download/signature`` proxy (the upstream mirror URL is kept
+        server-side), and that proxy requires the same Token auth as
+        ``/download`` — hence using ``self.client.session`` rather than a
+        bare ``requests.get``. We require the URL to share the platform's
+        origin so a compromised or misconfigured backend can't coerce us
+        into sending our Token to a third-party host.
+        """
+        base = urlparse(self.base_url)
+        target = urlparse(signature_url)
+        if (target.scheme, target.hostname, target.port) != (
+            base.scheme,
+            base.hostname,
+            base.port,
+        ):
+            raise PluginAPIError(
+                f"Refusing to fetch signature bundle from foreign origin "
+                f"{target.scheme}://{target.hostname}"
+            )
+
+        try:
+            response = self.client.session.get(
+                signature_url, timeout=HTTP_TIMEOUT_SECONDS, stream=True
+            )
+            _assert_all_https(response)
+            response.raise_for_status()
+
+            size_bytes = int(response.headers.get("Content-Length", 0))
+            if size_bytes > MAX_BUNDLE_SIZE_BYTES:
+                raise PluginAPIError(
+                    f"Signature bundle size {size_bytes} exceeds maximum "
+                    f"of {MAX_BUNDLE_SIZE_BYTES} bytes"
+                )
+
+            buffer = bytearray()
+            for chunk in response.iter_content(chunk_size=65536):
+                buffer.extend(chunk)
+                if len(buffer) > MAX_BUNDLE_SIZE_BYTES:
+                    raise PluginAPIError(
+                        f"Signature bundle exceeded maximum size of "
+                        f"{MAX_BUNDLE_SIZE_BYTES} bytes"
+                    )
+            return bytes(buffer)
+        except PluginAPIError:
+            raise
+        except requests.RequestException as e:
+            raise PluginAPIError(
+                f"Failed to download signature bundle from {signature_url}: {e}"
+            ) from e
 
     def report_installation(
         self, reference: str, version: str, platform: str, arch: str
@@ -260,7 +402,6 @@ class PluginAPIClient:
             response = self.client.session.post(
                 f"{self.base_url}/{self.API_VERSION}/endpoints/plugins/{reference}/installed",
                 json={"version": version, "platform": platform, "arch": arch},
-                headers=self._get_headers(),
             )
             response.raise_for_status()
         except Exception:
@@ -270,9 +411,3 @@ class PluginAPIClient:
                 version,
                 exc_info=True,
             )
-
-    def _get_headers(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Token {self.client.api_key}",
-            "Content-Type": "application/json",
-        }

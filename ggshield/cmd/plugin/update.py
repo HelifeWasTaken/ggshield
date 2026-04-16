@@ -19,7 +19,6 @@ from ggshield.core.errors import ExitCode
 from ggshield.core.plugin.client import (
     PluginAPIClient,
     PluginAPIError,
-    PluginNotAvailableError,
     PluginsNotEnabledError,
     PluginSourceType,
 )
@@ -154,7 +153,7 @@ def update_cmd(
             non_updatable_plugins.append(
                 {
                     "name": name,
-                    "source_type": source.type.value,
+                    "source_type": source.type,
                 }
             )
 
@@ -199,7 +198,6 @@ def update_cmd(
                 "Contact your administrator."
             )
             ctx.exit(ExitCode.UNEXPECTED_ERROR)
-            return
         except PluginAPIError as e:
             ui.display_error(str(e))
             ctx.exit(ExitCode.UNEXPECTED_ERROR)
@@ -259,7 +257,7 @@ def update_cmd(
             ui.display_heading("Cannot Auto-Update")
             for plugin in non_updatable_plugins:
                 ui.display_info(
-                    f"  {plugin['name']}: installed from {plugin['source_type']}"
+                    f"  {plugin['name']}: installed from {plugin['source_type'].value}"
                 )
             ui.display_info("Re-install these plugins manually to update.")
         return
@@ -297,8 +295,6 @@ def update_cmd(
         )
 
         try:
-            updated = False
-
             if source_type == PluginSourceType.PLATFORM:
                 assert plugin_api_client is not None
                 platform_info = get_platform_info()
@@ -307,19 +303,25 @@ def update_cmd(
                     platform_info=platform_info,
                     version=latest_version,
                 ) as (info, chunks):
+                    bundle_bytes = (
+                        plugin_api_client.download_signature_bundle(
+                            info.signature_url
+                        )
+                        if info.signature_url
+                        else None
+                    )
                     downloader.download_and_install(
-                        info, chunks, name, signature_mode=signature_mode
+                        info,
+                        chunks,
+                        name,
+                        signature_mode=signature_mode,
+                        bundle_bytes=bundle_bytes,
                     )
-                try:
-                    plugin_api_client.report_installation(
-                        name, info.version, platform_info.os, platform_info.arch
-                    )
-                except Exception:
-                    pass  # analytics is best-effort
-                updated = True
+                plugin_api_client.report_installation(
+                    name, info.version, platform_info.os, platform_info.arch
+                )
 
             elif source_type == PluginSourceType.GITHUB_RELEASE:
-                # Download from GitHub release URL
                 download_url = update.get("download_url")
                 github_repo = update.get("github_repo")
                 if not download_url or not github_repo:
@@ -330,26 +332,15 @@ def update_cmd(
                 downloader.download_from_github_release(
                     download_url, signature_mode=signature_mode
                 )
-                updated = True
 
             else:
                 raise DownloadError(f"Unsupported plugin source type: {source_type}")
 
-            if not updated:
-                raise DownloadError("Plugin update was skipped")
-
-            # Update config
             enterprise_config.enable_plugin(name, version=latest_version)
 
             ui.display_info(f"  Updated {name} to v{latest_version}")
             success_count += 1
 
-        except PluginNotAvailableError as e:
-            ui.display_error(f"  Failed to update {name}: {e}")
-            error_count += 1
-        except DownloadError as e:
-            ui.display_error(f"  Failed to update {name}: {e}")
-            error_count += 1
         except Exception as e:
             ui.display_error(f"  Failed to update {name}: {e}")
             error_count += 1

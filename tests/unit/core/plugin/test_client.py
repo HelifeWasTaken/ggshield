@@ -164,13 +164,6 @@ class TestPluginAPIClient:
 
         assert "Failed to fetch plugins" in str(exc_info.value)
 
-    def test_get_headers(self, mock_gg_client: MagicMock) -> None:
-        """Test _get_headers returns correct headers."""
-        client = PluginAPIClient(mock_gg_client)
-        headers = client._get_headers()
-        assert headers["Authorization"] == "Token test-api-key"
-        assert headers["Content-Type"] == "application/json"
-
     @patch("ggshield.core.plugin.client.get_platform_info")
     def test_get_available_plugins_new_endpoint(
         self, mock_platform: MagicMock, mock_gg_client: MagicMock

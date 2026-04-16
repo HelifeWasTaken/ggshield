@@ -39,15 +39,12 @@ def status_cmd(ctx: click.Context, **kwargs: Any) -> None:
             "Contact your administrator."
         )
         ctx.exit(ExitCode.UNEXPECTED_ERROR)
-        return
     except PluginAPIError as e:
         ui.display_error(str(e))
         ctx.exit(ExitCode.UNEXPECTED_ERROR)
-        return
     except Exception as e:
         ui.display_error(f"Failed to fetch plugin catalog: {e}")
         ctx.exit(ExitCode.UNEXPECTED_ERROR)
-        return
 
     # Load local config for installed plugins info
     enterprise_config = EnterpriseConfig.load()
