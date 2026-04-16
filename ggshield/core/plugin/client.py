@@ -2,14 +2,20 @@
 Plugin API client - fetches available plugins from GitGuardian API.
 """
 
+import logging
+import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, Iterator, List, Optional, Tuple
 
 import requests
 from pygitguardian import GGClient
 
 from ggshield.core.plugin.platform import PlatformInfo, get_platform_info
+
+
+logger = logging.getLogger(__name__)
 
 
 class PluginSourceType(Enum):
@@ -90,21 +96,17 @@ class PluginInfo:
 class PluginCatalog:
     """Catalog of available plugins for the account."""
 
-    plan: str
-    features: Dict[str, bool]
     plugins: List[PluginInfo]
 
 
 @dataclass
 class PluginDownloadInfo:
-    """Information needed to download a plugin."""
+    """Metadata about a plugin wheel received from the platform download endpoint."""
 
-    download_url: str
-    filename: str
-    sha256: str
-    version: str
-    expires_at: str
-    signature_url: Optional[str] = None
+    filename: str    # from Content-Disposition header
+    sha256: str      # from X-Plugin-SHA256 header
+    version: str     # from X-Plugin-Version header
+    size_bytes: int  # from Content-Length header
 
 
 class PluginAPIError(Exception):
@@ -125,6 +127,12 @@ class PluginNotAvailableError(Exception):
         super().__init__(message)
 
 
+class PluginsNotEnabledError(Exception):
+    """Plugin system is not enabled on this workspace (feature-flag OFF)."""
+
+    pass
+
+
 class PluginAPIClient:
     """Client for GitGuardian plugin API."""
 
@@ -140,115 +148,128 @@ class PluginAPIClient:
 
         try:
             response = self.client.session.get(
-                f"{self.base_url}/{self.API_VERSION}/plugins",
+                f"{self.base_url}/{self.API_VERSION}/endpoints/plugins",
                 params={
                     "platform": platform_info.os,
                     "arch": platform_info.arch,
                 },
                 headers=self._get_headers(),
             )
+            if response.status_code == 404:
+                raise PluginsNotEnabledError()
             response.raise_for_status()
+        except PluginsNotEnabledError:
+            raise
         except requests.RequestException as e:
             raise PluginAPIError(f"Failed to fetch plugins: {e}") from e
 
-        data = response.json()
-
-        account_data = data.get("account", {})
-        current_platform = f"{platform_info.os}-{platform_info.arch}"
+        plugins_data = response.json()  # list, not a dict
 
         return PluginCatalog(
-            plan=account_data.get("plan", data.get("plan", "unknown")),
-            features=account_data.get("features", data.get("features", {})),
             plugins=[
                 PluginInfo(
-                    name=p.get("name", "unknown"),
-                    display_name=p.get("display_name", p.get("name", "Unknown")),
+                    name=p["reference"],
+                    display_name=p.get("display_name", p["reference"]),
                     description=p.get("description", ""),
-                    available=self._is_plugin_available(p, current_platform),
-                    latest_version=p.get("latest_version"),
-                    supported_platforms=p.get("supported_platforms", []),
-                    reason=self._get_unavailable_reason(p, current_platform),
+                    available=p.get("available", False),
+                    latest_version=(
+                        p["releases"][0]["version"] if p.get("releases") else None
+                    ),
+                    supported_platforms=[],
+                    reason=p.get("reason"),
                 )
-                for p in data.get("plugins", [])
+                for p in plugins_data
             ],
         )
 
-    def get_download_info(
+    @contextmanager
+    def download_plugin(
         self,
-        plugin_name: str,
-        version: Optional[str] = None,
+        reference: str,
         platform_info: Optional[PlatformInfo] = None,
-    ) -> PluginDownloadInfo:
-        """Get download URL for a plugin wheel."""
-        resolved_platform_info: PlatformInfo
-        if platform_info is None:
-            resolved_platform_info = get_platform_info()
-        else:
-            resolved_platform_info = platform_info
+        version: Optional[str] = None,
+    ) -> Generator[Tuple[PluginDownloadInfo, Iterator[bytes]], None, None]:
+        """Stream a plugin wheel from the platform.
 
+        Usage::
+
+            with client.download_plugin("tokenscanner") as (info, chunks):
+                downloader.download_and_install(info, chunks, "tokenscanner")
+        """
+        resolved = platform_info if platform_info is not None else get_platform_info()
         params: Dict[str, str] = {
-            "platform": resolved_platform_info.os,
-            "arch": resolved_platform_info.arch,
-            "python_abi": resolved_platform_info.python_abi,
+            "platform": resolved.os,
+            "arch": resolved.arch,
+            "python_abi": resolved.python_abi,
         }
         if version:
             params["version"] = version
 
+        response = None
         try:
             response = self.client.session.get(
-                f"{self.base_url}/{self.API_VERSION}/plugins/{plugin_name}/download",
+                f"{self.base_url}/{self.API_VERSION}/endpoints/plugins/{reference}/download",
                 params=params,
                 headers=self._get_headers(),
+                stream=True,
             )
-
             if response.status_code == 403:
-                raise PluginNotAvailableError(plugin_name)
-            elif response.status_code == 404:
-                raise PluginNotAvailableError(
-                    plugin_name, "Plugin or version not found"
-                )
-
+                raise PluginNotAvailableError(reference)
+            if response.status_code == 404:
+                raise PluginNotAvailableError(reference, "Plugin or version not found")
             response.raise_for_status()
 
-        except PluginNotAvailableError:
+            content_disposition = response.headers.get("Content-Disposition", "")
+            match = re.search(r'filename="([^"]+)"', content_disposition)
+            filename = match.group(1) if match else f"{reference}.whl"
+
+            sha256 = response.headers.get("X-Plugin-SHA256")
+            if not sha256:
+                raise PluginAPIError(
+                    f"Server response missing X-Plugin-SHA256 header for {reference}"
+                )
+            resolved_version = response.headers.get("X-Plugin-Version")
+            if not resolved_version:
+                raise PluginAPIError(
+                    f"Server response missing X-Plugin-Version header for {reference}"
+                )
+
+            info = PluginDownloadInfo(
+                filename=filename,
+                sha256=sha256,
+                version=resolved_version,
+                size_bytes=int(response.headers.get("Content-Length", 0)),
+            )
+            yield info, response.iter_content(chunk_size=8192)
+        except (PluginNotAvailableError, PluginAPIError):
             raise
         except requests.RequestException as e:
-            raise PluginAPIError(f"Failed to get download info: {e}") from e
+            raise PluginAPIError(f"Failed to download plugin: {e}") from e
+        finally:
+            if response is not None:
+                response.close()
 
-        data = response.json()
+    def report_installation(
+        self, reference: str, version: str, platform: str, arch: str
+    ) -> None:
+        """Report a successful plugin installation for analytics (best-effort).
 
-        return PluginDownloadInfo(
-            download_url=data["download_url"],
-            filename=data["filename"],
-            sha256=data["sha256"],
-            version=data["version"],
-            expires_at=data["expires_at"],
-            signature_url=data.get("signature_url"),
-        )
-
-    def _is_plugin_available(
-        self, plugin_data: Dict[str, Any], current_platform: str
-    ) -> bool:
-        if not plugin_data.get("available", True):
-            return False
-        supported = plugin_data.get("supported_platforms", [])
-        if not supported:
-            return True
-        return current_platform in supported or "any-any" in supported
-
-    def _get_unavailable_reason(
-        self, plugin_data: Dict[str, Any], current_platform: str
-    ) -> Optional[str]:
-        if plugin_data.get("reason"):
-            return plugin_data["reason"]
-        supported = plugin_data.get("supported_platforms", [])
-        if (
-            supported
-            and current_platform not in supported
-            and "any-any" not in supported
-        ):
-            return f"Not available for {current_platform}. Supported: {', '.join(supported)}"
-        return None
+        Never raises — a failure here must not fail the install.
+        """
+        try:
+            response = self.client.session.post(
+                f"{self.base_url}/{self.API_VERSION}/endpoints/plugins/{reference}/installed",
+                json={"version": version, "platform": platform, "arch": arch},
+                headers=self._get_headers(),
+            )
+            response.raise_for_status()
+        except Exception:
+            logger.warning(
+                "Failed to report plugin installation for %s v%s",
+                reference,
+                version,
+                exc_info=True,
+            )
 
     def _get_headers(self) -> Dict[str, str]:
         return {

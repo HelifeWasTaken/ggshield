@@ -45,7 +45,6 @@ class TestPluginInstall:
         THEN the plugin is downloaded and installed
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -56,16 +55,10 @@ class TestPluginInstall:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
-        mock_download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
-            filename="tokenscanner-1.0.0.whl",
-            sha256="abc123",
-            version="1.0.0",
-            expires_at="2099-12-31T23:59:59Z",
-        )
+        mock_download_info = mock.MagicMock()
+        mock_download_info.version = "1.0.0"
 
         with (
             mock.patch(
@@ -121,7 +114,6 @@ class TestPluginInstall:
     )
     def test_install_unavailable_plugin(self, cli_fs_runner, reason):
         mock_catalog = PluginCatalog(
-            plan="Free",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -132,7 +124,6 @@ class TestPluginInstall:
                     reason=reason,
                 ),
             ],
-            features={},
         )
 
         with (
@@ -166,9 +157,7 @@ class TestPluginInstall:
         THEN it shows an error
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[],
-            features={},
         )
 
         with (
@@ -199,7 +188,6 @@ class TestPluginInstall:
         THEN the specified version is requested
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -210,16 +198,10 @@ class TestPluginInstall:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
-        mock_download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
-            filename="plugin-1.0.0.whl",
-            sha256="abc123",
-            version="1.0.0",
-            expires_at="2099-12-31T23:59:59Z",
-        )
+        mock_download_info = mock.MagicMock()
+        mock_download_info.version = "1.0.0"
 
         with (
             mock.patch(
@@ -267,7 +249,6 @@ class TestPluginInstall:
         THEN it shows an error
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -278,16 +259,10 @@ class TestPluginInstall:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
-        mock_download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
-            filename="tokenscanner-1.0.0.whl",
-            sha256="abc123",
-            version="1.0.0",
-            expires_at="2099-12-31T23:59:59Z",
-        )
+        mock_download_info = mock.MagicMock()
+        mock_download_info.version = "1.0.0"
 
         with (
             mock.patch(
@@ -393,7 +368,6 @@ class TestPluginInstall:
         from ggshield.core.plugin.client import PluginNotAvailableError
 
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -404,7 +378,6 @@ class TestPluginInstall:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         with (
@@ -449,7 +422,6 @@ class TestPluginInstall:
         THEN it shows an error
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -460,16 +432,10 @@ class TestPluginInstall:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
-        mock_download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
-            filename="tokenscanner-1.0.0.whl",
-            sha256="abc123",
-            version="1.0.0",
-            expires_at="2099-12-31T23:59:59Z",
-        )
+        mock_download_info = mock.MagicMock()
+        mock_download_info.version = "1.0.0"
 
         with (
             mock.patch(
@@ -506,6 +472,47 @@ class TestPluginInstall:
 
         assert result.exit_code == ExitCode.UNEXPECTED_ERROR
         assert "Failed to install tokenscanner" in result.output
+
+    def test_install_unavailable_plugin_without_reason(self, cli_fs_runner):
+        """
+        GIVEN a plugin exists but is not available (without reason)
+        WHEN running 'ggshield plugin install <plugin>'
+        THEN it shows an error without reason
+        """
+        mock_catalog = PluginCatalog(
+            plugins=[
+                PluginInfo(
+                    name="tokenscanner",
+                    display_name="Token Scanner",
+                    description="Local secret scanning",
+                    available=False,
+                    latest_version="1.0.0",
+                    reason=None,
+                ),
+            ],
+        )
+
+        with (
+            mock.patch(
+                "ggshield.cmd.plugin.install.create_client_from_config"
+            ) as mock_create_client,
+            mock.patch(
+                "ggshield.cmd.plugin.install.PluginAPIClient"
+            ) as mock_plugin_api_client_class,
+        ):
+            mock_client = mock.MagicMock()
+            mock_create_client.return_value = mock_client
+
+            mock_plugin_api_client = mock.MagicMock()
+            mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
+            mock_plugin_api_client_class.return_value = mock_plugin_api_client
+
+            result = cli_fs_runner.invoke(cli, ["plugin", "install", "tokenscanner"])
+
+        assert result.exit_code == ExitCode.USAGE_ERROR
+        assert "not available" in result.output
+        # Should not show "Reason:" when reason is None
+        assert "Reason:" not in result.output
 
 
 class TestDetectSourceType:

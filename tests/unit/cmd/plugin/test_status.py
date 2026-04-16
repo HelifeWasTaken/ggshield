@@ -19,9 +19,7 @@ class TestPluginStatus:
         THEN it shows the plan information
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[],
-            features={},
         )
 
         with (
@@ -61,12 +59,7 @@ class TestPluginStatus:
         THEN it shows the features
         """
         mock_catalog = PluginCatalog(
-            plan="Business",
             plugins=[],
-            features={
-                "local_scanning": True,
-                "advanced_detection": False,
-            },
         )
 
         with (
@@ -109,7 +102,6 @@ class TestPluginStatus:
         THEN it shows the available plugins
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -128,7 +120,6 @@ class TestPluginStatus:
                     reason="Requires Enterprise Plus plan",
                 ),
             ],
-            features={},
         )
 
         with (
@@ -180,7 +171,6 @@ class TestPluginStatus:
         THEN it shows the installed version
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -191,7 +181,6 @@ class TestPluginStatus:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         with (
@@ -357,7 +346,6 @@ class TestPluginStatus:
         THEN it shows the plugin as disabled
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -368,7 +356,6 @@ class TestPluginStatus:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         with (
@@ -416,7 +403,6 @@ class TestPluginStatus:
         THEN it shows the plugin as not available
         """
         mock_catalog = PluginCatalog(
-            plan="Free",
             plugins=[
                 PluginInfo(
                     name="premium",
@@ -427,7 +413,6 @@ class TestPluginStatus:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         with (

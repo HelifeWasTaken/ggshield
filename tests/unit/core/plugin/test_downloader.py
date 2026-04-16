@@ -4,6 +4,7 @@ import hashlib
 import json
 import zipfile
 from pathlib import Path
+from typing import Iterator
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -179,29 +180,25 @@ class TestPluginDownloader:
         sha256 = hashlib.sha256(wheel_content).hexdigest()
 
         download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
             filename="testplugin-1.0.0.whl",
             sha256=sha256,
             version="1.0.0",
-            expires_at="2025-01-01T00:00:00Z",
+            size_bytes=len(wheel_content),
         )
-
-        mock_response = MagicMock()
-        mock_response.iter_content.return_value = [wheel_content]
-        mock_response.raise_for_status = MagicMock()
 
         with patch(
             "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
         ):
-            with patch("requests.get", return_value=mock_response):
-                with patch(
-                    "ggshield.core.plugin.downloader.verify_wheel_signature",
-                    return_value=MOCK_SIG_INFO,
-                ):
-                    downloader = PluginDownloader()
-                    wheel_path = downloader.download_and_install(
-                        download_info, "testplugin"
-                    )
+            with patch(
+                "ggshield.core.plugin.downloader.verify_wheel_signature",
+                return_value=MOCK_SIG_INFO,
+            ):
+                downloader = PluginDownloader()
+                wheel_path = downloader.download_and_install(
+                    download_info,
+                    iter([wheel_content]),
+                    "testplugin",
+                )
 
         assert wheel_path.exists()
         assert wheel_path.name == "testplugin-1.0.0.whl"
@@ -300,72 +297,75 @@ class TestPluginDownloader:
         wrong_sha256 = "0" * 64  # Wrong checksum
 
         download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
             filename="testplugin-1.0.0.whl",
             sha256=wrong_sha256,
             version="1.0.0",
-            expires_at="2025-01-01T00:00:00Z",
+            size_bytes=len(wheel_content),
         )
-
-        mock_response = MagicMock()
-        mock_response.iter_content.return_value = [wheel_content]
-        mock_response.raise_for_status = MagicMock()
 
         with patch(
             "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
         ):
-            with patch("requests.get", return_value=mock_response):
-                downloader = PluginDownloader()
+            downloader = PluginDownloader()
 
-                with pytest.raises(ChecksumMismatchError):
-                    downloader.download_and_install(download_info, "testplugin")
+            with pytest.raises(ChecksumMismatchError):
+                downloader.download_and_install(
+                    download_info,
+                    iter([wheel_content]),
+                    "testplugin",
+                )
 
     def test_download_and_install_network_error(self, tmp_path: Path) -> None:
-        """Test download fails with network error."""
+        """Test download fails with network error (simulated via raising iterator)."""
         download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
             filename="testplugin-1.0.0.whl",
             sha256="abc123",
             version="1.0.0",
-            expires_at="2025-01-01T00:00:00Z",
+            size_bytes=10,
         )
+
+        def raising_chunks() -> Iterator[bytes]:
+            raise OSError("Network error")
+            yield b""  # make it a generator
 
         with patch(
             "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
         ):
-            with patch(
-                "requests.get", side_effect=requests.RequestException("Network error")
-            ):
-                downloader = PluginDownloader()
+            downloader = PluginDownloader()
 
-                with pytest.raises(DownloadError) as exc_info:
-                    downloader.download_and_install(download_info, "testplugin")
+            with pytest.raises(OSError) as exc_info:
+                downloader.download_and_install(
+                    download_info,
+                    raising_chunks(),
+                    "testplugin",
+                )
 
-                assert "Failed to download plugin" in str(exc_info.value)
+            assert "Network error" in str(exc_info.value)
 
     def test_download_and_install_rejects_invalid_plugin_name(
         self, tmp_path: Path
     ) -> None:
         """Test install rejects unsafe plugin names."""
         download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
             filename="testplugin-1.0.0.whl",
             sha256="abc123",
             version="1.0.0",
-            expires_at="2025-01-01T00:00:00Z",
+            size_bytes=100,
         )
 
         with patch(
             "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
         ):
-            with patch("requests.get") as mock_get:
-                downloader = PluginDownloader()
+            downloader = PluginDownloader()
 
-                with pytest.raises(DownloadError) as exc_info:
-                    downloader.download_and_install(download_info, "../../outside")
+            with pytest.raises(DownloadError) as exc_info:
+                downloader.download_and_install(
+                    download_info,
+                    iter([b""]),
+                    "../../outside",
+                )
 
-                assert "Invalid plugin name" in str(exc_info.value)
-                mock_get.assert_not_called()
+            assert "Invalid plugin name" in str(exc_info.value)
 
     def test_download_and_install_manifest_failure_cleans_temp_file(
         self, tmp_path: Path
@@ -375,32 +375,30 @@ class TestPluginDownloader:
         sha256 = hashlib.sha256(wheel_content).hexdigest()
 
         download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
             filename="testplugin-1.0.0.whl",
             sha256=sha256,
             version="1.0.0",
-            expires_at="2025-01-01T00:00:00Z",
+            size_bytes=len(wheel_content),
         )
-
-        mock_response = MagicMock()
-        mock_response.iter_content.return_value = [wheel_content]
-        mock_response.raise_for_status = MagicMock()
 
         with patch(
             "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
         ):
-            with patch("requests.get", return_value=mock_response):
-                with patch(
-                    "ggshield.core.plugin.downloader.verify_wheel_signature",
-                    return_value=MOCK_SIG_INFO,
-                ):
-                    downloader = PluginDownloader()
+            with patch(
+                "ggshield.core.plugin.downloader.verify_wheel_signature",
+                return_value=MOCK_SIG_INFO,
+            ):
+                downloader = PluginDownloader()
 
-                    with patch.object(
-                        downloader, "_write_manifest", side_effect=OSError("disk full")
-                    ):
-                        with pytest.raises(OSError):
-                            downloader.download_and_install(download_info, "testplugin")
+                with patch.object(
+                    downloader, "_write_manifest", side_effect=OSError("disk full")
+                ):
+                    with pytest.raises(OSError):
+                        downloader.download_and_install(
+                            download_info,
+                            iter([wheel_content]),
+                            "testplugin",
+                        )
 
         temp_path = tmp_path / "testplugin" / "testplugin-1.0.0.whl.tmp"
         assert not temp_path.exists()
@@ -594,6 +592,65 @@ class TestPluginDownloader:
             downloader = PluginDownloader()
 
         assert downloader._read_entry_point_name_from_wheel(invalid_file) is None
+
+    def test_download_and_install_from_chunks(self, tmp_path: Path) -> None:
+        """
+        GIVEN a PluginDownloadInfo and an iterator of bytes
+        WHEN download_and_install is called
+        THEN it writes the wheel and verifies SHA256
+        """
+        # Build a minimal valid wheel zip
+        wheel_bytes = b"fake wheel content for sha test"
+        sha256 = hashlib.sha256(wheel_bytes).hexdigest()
+
+        download_info = PluginDownloadInfo(
+            filename="testplugin-1.0.0-py3-none-any.whl",
+            sha256=sha256,
+            version="1.0.0",
+            size_bytes=len(wheel_bytes),
+        )
+
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            result = downloader.download_and_install(
+                download_info,
+                iter([wheel_bytes]),
+                "testplugin",
+            )
+
+        assert result == tmp_path / "testplugin" / "testplugin-1.0.0-py3-none-any.whl"
+        assert result.read_bytes() == wheel_bytes
+
+    def test_download_and_install_raises_on_sha256_mismatch(
+        self, tmp_path: Path
+    ) -> None:
+        """
+        GIVEN a download info with wrong SHA256
+        WHEN download_and_install is called
+        THEN it raises ChecksumMismatchError and cleans up the temp file
+        """
+        download_info = PluginDownloadInfo(
+            filename="testplugin-1.0.0-py3-none-any.whl",
+            sha256="a" * 64,  # 64-char hex string (SHA256 length), wrong hash
+            version="1.0.0",
+            size_bytes=10,
+        )
+
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            with pytest.raises(ChecksumMismatchError):
+                downloader.download_and_install(
+                    download_info,
+                    iter([b"actual content"]),
+                    "testplugin",
+                )
+
+        # temp file must be cleaned up
+        assert not list((tmp_path / "testplugin").glob("*.tmp"))
 
 
 class TestChecksumMismatchError:

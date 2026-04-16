@@ -12,6 +12,7 @@ from ggshield.core.plugin.client import (
     PluginDownloadInfo,
     PluginInfo,
     PluginNotAvailableError,
+    PluginsNotEnabledError,
     PluginSourceType,
 )
 from ggshield.core.plugin.platform import PlatformInfo
@@ -116,35 +117,32 @@ class TestPluginAPIClient:
     def test_get_available_plugins_success(
         self, mock_platform: MagicMock, mock_gg_client: MagicMock
     ) -> None:
-        """Test successful plugin list fetch."""
+        """Test successful plugin list fetch returns PluginCatalog with plugins."""
         mock_platform.return_value = PlatformInfo(
             os="linux", arch="x86_64", python_abi="cp311"
         )
 
         mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "plan": "enterprise",
-            "features": {"local_scanning": True},
-            "plugins": [
-                {
-                    "name": "tokenscanner",
-                    "display_name": "Token Scanner",
-                    "description": "Local scanning",
-                    "available": True,
-                    "latest_version": "1.0.0",
-                }
-            ],
-        }
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {
+                "reference": "tokenscanner",
+                "display_name": "Token Scanner",
+                "description": "Local scanning",
+                "available": True,
+                "reason": None,
+                "releases": [{"version": "1.0.0"}],
+            }
+        ]
         mock_gg_client.session.get.return_value = mock_response
 
         client = PluginAPIClient(mock_gg_client)
         catalog = client.get_available_plugins()
 
         assert isinstance(catalog, PluginCatalog)
-        assert catalog.plan == "enterprise"
-        assert catalog.features == {"local_scanning": True}
         assert len(catalog.plugins) == 1
         assert catalog.plugins[0].name == "tokenscanner"
+        assert catalog.plugins[0].latest_version == "1.0.0"
 
     @patch("ggshield.core.plugin.client.get_platform_info")
     def test_get_available_plugins_request_error(
@@ -166,164 +164,182 @@ class TestPluginAPIClient:
 
         assert "Failed to fetch plugins" in str(exc_info.value)
 
-    @patch("ggshield.core.plugin.client.get_platform_info")
-    def test_get_download_info_success(
-        self, mock_platform: MagicMock, mock_gg_client: MagicMock
-    ) -> None:
-        """Test successful download info fetch."""
-        mock_platform.return_value = PlatformInfo(
-            os="linux", arch="x86_64", python_abi="cp311"
-        )
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "download_url": "https://example.com/plugin.whl",
-            "filename": "plugin-1.0.0.whl",
-            "sha256": "abc123",
-            "version": "1.0.0",
-            "expires_at": "2025-01-01T00:00:00Z",
-        }
-        mock_gg_client.session.get.return_value = mock_response
-
-        client = PluginAPIClient(mock_gg_client)
-        info = client.get_download_info("testplugin")
-
-        assert isinstance(info, PluginDownloadInfo)
-        assert info.download_url == "https://example.com/plugin.whl"
-        assert info.filename == "plugin-1.0.0.whl"
-        assert info.sha256 == "abc123"
-        assert info.version == "1.0.0"
-
-    @patch("ggshield.core.plugin.client.get_platform_info")
-    def test_get_download_info_with_version(
-        self, mock_platform: MagicMock, mock_gg_client: MagicMock
-    ) -> None:
-        """Test download info fetch with specific version."""
-        mock_platform.return_value = PlatformInfo(
-            os="linux", arch="x86_64", python_abi="cp311"
-        )
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "download_url": "https://example.com/plugin.whl",
-            "filename": "plugin-0.9.0.whl",
-            "sha256": "def456",
-            "version": "0.9.0",
-            "expires_at": "2025-01-01T00:00:00Z",
-        }
-        mock_gg_client.session.get.return_value = mock_response
-
-        client = PluginAPIClient(mock_gg_client)
-        info = client.get_download_info("testplugin", version="0.9.0")
-
-        assert info.version == "0.9.0"
-        mock_gg_client.session.get.assert_called_once()
-        call_kwargs = mock_gg_client.session.get.call_args[1]
-        assert call_kwargs["params"]["version"] == "0.9.0"
-
-    @patch("ggshield.core.plugin.client.get_platform_info")
-    def test_get_download_info_forbidden(
-        self, mock_platform: MagicMock, mock_gg_client: MagicMock
-    ) -> None:
-        """Test download info with 403 response."""
-        mock_platform.return_value = PlatformInfo(
-            os="linux", arch="x86_64", python_abi="cp311"
-        )
-
-        mock_response = MagicMock()
-        mock_response.status_code = 403
-        mock_gg_client.session.get.return_value = mock_response
-
-        client = PluginAPIClient(mock_gg_client)
-
-        with pytest.raises(PluginNotAvailableError) as exc_info:
-            client.get_download_info("testplugin")
-
-        assert exc_info.value.plugin_name == "testplugin"
-
-    @patch("ggshield.core.plugin.client.get_platform_info")
-    def test_get_download_info_not_found(
-        self, mock_platform: MagicMock, mock_gg_client: MagicMock
-    ) -> None:
-        """Test download info with 404 response."""
-        mock_platform.return_value = PlatformInfo(
-            os="linux", arch="x86_64", python_abi="cp311"
-        )
-
-        mock_response = MagicMock()
-        mock_response.status_code = 404
-        mock_gg_client.session.get.return_value = mock_response
-
-        client = PluginAPIClient(mock_gg_client)
-
-        with pytest.raises(PluginNotAvailableError) as exc_info:
-            client.get_download_info("testplugin")
-
-        assert "not found" in exc_info.value.reason.lower()
-
-    def test_is_plugin_available_explicit_false(
-        self, mock_gg_client: MagicMock
-    ) -> None:
-        """Test _is_plugin_available with explicit available=false."""
-        client = PluginAPIClient(mock_gg_client)
-        plugin_data = {"available": False}
-        assert client._is_plugin_available(plugin_data, "linux-x86_64") is False
-
-    def test_is_plugin_available_no_platform_restrictions(
-        self, mock_gg_client: MagicMock
-    ) -> None:
-        """Test _is_plugin_available with no platform restrictions."""
-        client = PluginAPIClient(mock_gg_client)
-        plugin_data = {"available": True, "supported_platforms": []}
-        assert client._is_plugin_available(plugin_data, "linux-x86_64") is True
-
-    def test_is_plugin_available_platform_match(
-        self, mock_gg_client: MagicMock
-    ) -> None:
-        """Test _is_plugin_available with matching platform."""
-        client = PluginAPIClient(mock_gg_client)
-        plugin_data = {"available": True, "supported_platforms": ["linux-x86_64"]}
-        assert client._is_plugin_available(plugin_data, "linux-x86_64") is True
-        assert client._is_plugin_available(plugin_data, "win-amd64") is False
-
-    def test_is_plugin_available_any_any(self, mock_gg_client: MagicMock) -> None:
-        """Test _is_plugin_available with any-any wildcard."""
-        client = PluginAPIClient(mock_gg_client)
-        plugin_data = {"available": True, "supported_platforms": ["any-any"]}
-        assert client._is_plugin_available(plugin_data, "linux-x86_64") is True
-        assert client._is_plugin_available(plugin_data, "win-amd64") is True
-
-    def test_get_unavailable_reason_explicit(self, mock_gg_client: MagicMock) -> None:
-        """Test _get_unavailable_reason with explicit reason."""
-        client = PluginAPIClient(mock_gg_client)
-        plugin_data = {"reason": "Requires enterprise plan"}
-        assert (
-            client._get_unavailable_reason(plugin_data, "linux-x86_64")
-            == "Requires enterprise plan"
-        )
-
-    def test_get_unavailable_reason_platform_mismatch(
-        self, mock_gg_client: MagicMock
-    ) -> None:
-        """Test _get_unavailable_reason with platform mismatch."""
-        client = PluginAPIClient(mock_gg_client)
-        plugin_data = {"supported_platforms": ["macosx-arm64"]}
-        reason = client._get_unavailable_reason(plugin_data, "linux-x86_64")
-        assert reason is not None
-        assert "linux-x86_64" in reason
-        assert "macosx-arm64" in reason
-
-    def test_get_unavailable_reason_none(self, mock_gg_client: MagicMock) -> None:
-        """Test _get_unavailable_reason returns None when available."""
-        client = PluginAPIClient(mock_gg_client)
-        plugin_data = {"supported_platforms": ["linux-x86_64"]}
-        assert client._get_unavailable_reason(plugin_data, "linux-x86_64") is None
-
     def test_get_headers(self, mock_gg_client: MagicMock) -> None:
         """Test _get_headers returns correct headers."""
         client = PluginAPIClient(mock_gg_client)
         headers = client._get_headers()
         assert headers["Authorization"] == "Token test-api-key"
         assert headers["Content-Type"] == "application/json"
+
+    @patch("ggshield.core.plugin.client.get_platform_info")
+    def test_get_available_plugins_new_endpoint(
+        self, mock_platform: MagicMock, mock_gg_client: MagicMock
+    ) -> None:
+        """get_available_plugins calls /v1/endpoints/plugins and parses the list."""
+        mock_platform.return_value = PlatformInfo(
+            os="linux", arch="x86_64", python_abi="cp311"
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = [
+            {
+                "reference": "tokenscanner",
+                "display_name": "Token Scanner",
+                "description": "Local scanning",
+                "available": True,
+                "reason": None,
+                "releases": [{"version": "2.0.0"}, {"version": "1.0.0"}],
+            }
+        ]
+        mock_gg_client.session.get.return_value = mock_response
+
+        client = PluginAPIClient(mock_gg_client)
+        catalog = client.get_available_plugins()
+
+        url_called = mock_gg_client.session.get.call_args[0][0]
+        assert "/v1/endpoints/plugins" in url_called
+        assert len(catalog.plugins) == 1
+        assert catalog.plugins[0].name == "tokenscanner"
+        assert catalog.plugins[0].latest_version == "2.0.0"
+        assert catalog.plugins[0].available is True
+
+    @patch("ggshield.core.plugin.client.get_platform_info")
+    def test_get_available_plugins_raises_plugins_not_enabled_on_404(
+        self, mock_platform: MagicMock, mock_gg_client: MagicMock
+    ) -> None:
+        """get_available_plugins raises PluginsNotEnabledError on 404."""
+        mock_platform.return_value = PlatformInfo(
+            os="linux", arch="x86_64", python_abi="cp311"
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_gg_client.session.get.return_value = mock_response
+
+        client = PluginAPIClient(mock_gg_client)
+
+        with pytest.raises(PluginsNotEnabledError):
+            client.get_available_plugins()
+
+    @patch("ggshield.core.plugin.client.get_platform_info")
+    def test_download_plugin_yields_info_and_chunks(
+        self, mock_platform: MagicMock, mock_gg_client: MagicMock
+    ) -> None:
+        """download_plugin yields PluginDownloadInfo and chunk iterator."""
+        mock_platform.return_value = PlatformInfo(
+            os="linux", arch="x86_64", python_abi="cp311"
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            "Content-Disposition": 'attachment; filename="tokenscanner-1.0.0.whl"',
+            "X-Plugin-SHA256": "abc123def456",
+            "X-Plugin-Version": "1.0.0",
+            "Content-Length": "12345",
+        }
+        mock_response.iter_content.return_value = iter([b"chunk1", b"chunk2"])
+        mock_gg_client.session.get.return_value = mock_response
+
+        client = PluginAPIClient(mock_gg_client)
+        with client.download_plugin("tokenscanner") as (info, chunks):
+            assert info.filename == "tokenscanner-1.0.0.whl"
+            assert info.sha256 == "abc123def456"
+            assert info.version == "1.0.0"
+            assert info.size_bytes == 12345
+            data = list(chunks)
+
+        assert data == [b"chunk1", b"chunk2"]
+        mock_response.close.assert_called_once()
+
+    @patch("ggshield.core.plugin.client.get_platform_info")
+    def test_download_plugin_raises_on_403(
+        self, mock_platform: MagicMock, mock_gg_client: MagicMock
+    ) -> None:
+        """download_plugin raises PluginNotAvailableError on 403."""
+        mock_platform.return_value = PlatformInfo(
+            os="linux", arch="x86_64", python_abi="cp311"
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 403
+        mock_gg_client.session.get.return_value = mock_response
+
+        client = PluginAPIClient(mock_gg_client)
+        with pytest.raises(PluginNotAvailableError) as exc_info:
+            with client.download_plugin("tokenscanner"):
+                pass
+
+        assert exc_info.value.plugin_name == "tokenscanner"
+        mock_response.close.assert_called_once()
+
+    @patch("ggshield.core.plugin.client.get_platform_info")
+    def test_download_plugin_raises_on_404(
+        self, mock_platform: MagicMock, mock_gg_client: MagicMock
+    ) -> None:
+        """download_plugin raises PluginNotAvailableError on 404."""
+        mock_platform.return_value = PlatformInfo(
+            os="linux", arch="x86_64", python_abi="cp311"
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 404
+        mock_gg_client.session.get.return_value = mock_response
+
+        client = PluginAPIClient(mock_gg_client)
+        with pytest.raises(PluginNotAvailableError) as exc_info:
+            with client.download_plugin("tokenscanner"):
+                pass
+
+        assert "not found" in exc_info.value.reason.lower()
+        mock_response.close.assert_called_once()
+
+    @patch("ggshield.core.plugin.client.get_platform_info")
+    def test_download_plugin_closes_response_on_mid_stream_error(
+        self, mock_platform: MagicMock, mock_gg_client: MagicMock
+    ) -> None:
+        """download_plugin closes the response even when caller raises inside the with block."""
+        mock_platform.return_value = PlatformInfo(
+            os="linux", arch="x86_64", python_abi="cp311"
+        )
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            "Content-Disposition": 'attachment; filename="tokenscanner-1.0.0.whl"',
+            "X-Plugin-SHA256": "abc123",
+            "X-Plugin-Version": "1.0.0",
+            "Content-Length": "100",
+        }
+        mock_response.iter_content.return_value = iter([b"data"])
+        mock_gg_client.session.get.return_value = mock_response
+
+        client = PluginAPIClient(mock_gg_client)
+        with pytest.raises(RuntimeError):
+            with client.download_plugin("tokenscanner"):
+                raise RuntimeError("mid-stream failure")
+
+        mock_response.close.assert_called_once()
+
+    def test_report_installation_posts_correct_body(
+        self, mock_gg_client: MagicMock
+    ) -> None:
+        """report_installation POSTs to /installed with version, platform, arch."""
+        mock_response = MagicMock()
+        mock_response.raise_for_status.return_value = None
+        mock_gg_client.session.post.return_value = mock_response
+
+        client = PluginAPIClient(mock_gg_client)
+        client.report_installation("tokenscanner", "1.0.0", "linux", "x86_64")
+
+        mock_gg_client.session.post.assert_called_once()
+        call_args = mock_gg_client.session.post.call_args
+        url = call_args[0][0]
+        body = call_args[1]["json"]
+        assert "/endpoints/plugins/tokenscanner/installed" in url
+        assert body == {"version": "1.0.0", "platform": "linux", "arch": "x86_64"}
+
+    def test_report_installation_swallows_network_error(
+        self, mock_gg_client: MagicMock
+    ) -> None:
+        """report_installation does not raise when the network call fails."""
+        mock_gg_client.session.post.side_effect = Exception("network failure")
+
+        client = PluginAPIClient(mock_gg_client)
+        # Must not raise
+        client.report_installation("tokenscanner", "1.0.0", "linux", "x86_64")

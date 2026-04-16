@@ -11,7 +11,7 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 import requests
 
@@ -100,11 +100,33 @@ class PluginDownloader:
     def download_and_install(
         self,
         download_info: PluginDownloadInfo,
+        chunks: Iterator[bytes],
         plugin_name: str,
         source: Optional[PluginSource] = None,
         signature_mode: SignatureVerificationMode = SignatureVerificationMode.STRICT,
     ) -> Path:
-        """Download a plugin wheel and install it locally."""
+        """Install a plugin wheel from a byte stream.
+
+        Args:
+            download_info: Filename, SHA256, version from the platform response headers.
+            chunks: Iterator of raw bytes (from streaming HTTP response or test fixture).
+            plugin_name: Name used for the local plugin directory.
+            source: Manifest source record. Defaults to PluginSourceType.PLATFORM.
+            signature_mode: Sigstore verification mode. Platform streams don't
+                currently carry a signature bundle (the /download endpoint
+                proxies wheel bytes only), so verification runs against
+                whatever bundle file the caller may have placed alongside;
+                STRICT mode will therefore fail for pure platform streams
+                until the backend also proxies bundles.
+
+        Returns:
+            Path to the installed wheel file.
+
+        Raises:
+            ChecksumMismatchError: SHA256 of received bytes does not match download_info.sha256.
+            DownloadError: File system error during installation.
+            SignatureVerificationError: In STRICT mode when signature is invalid.
+        """
         self._validate_plugin_name(plugin_name)
 
         plugin_dir = self.plugins_dir / plugin_name
@@ -114,13 +136,10 @@ class PluginDownloader:
         temp_path = plugin_dir / f"{download_info.filename}.tmp"
 
         try:
-            logger.info("Downloading %s...", download_info.filename)
-            response = requests.get(download_info.download_url, stream=True)
-            response.raise_for_status()
-
+            logger.info("Installing %s...", download_info.filename)
             sha256_hash = hashlib.sha256()
             with open(temp_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=8192):
+                for chunk in chunks:
                     f.write(chunk)
                     sha256_hash.update(chunk)
 
@@ -128,15 +147,15 @@ class PluginDownloader:
             if computed_hash.lower() != download_info.sha256.lower():
                 raise ChecksumMismatchError(download_info.sha256, computed_hash)
 
-            # Remove any stale bundle sidecars for this wheel name before
-            # writing the new wheel/bundle pair.
+            # Remove any stale bundle sidecars before moving the new wheel
+            # into place.
             self._remove_bundle_files(wheel_path)
-
-            # Download signature bundle if available
             temp_path.rename(wheel_path)
-            self._download_bundle(download_info, plugin_dir)
 
-            # Verify signature
+            # Verify signature against whatever bundle is on disk. The
+            # platform /download endpoint doesn't proxy bundles yet, so
+            # platform streams verify as unsigned unless the caller
+            # arranged a bundle separately.
             sig_info = verify_wheel_signature(wheel_path, signature_mode)
 
             # Use platform as default source if not provided
@@ -158,12 +177,8 @@ class PluginDownloader:
             )
 
             logger.info("Installed %s v%s", plugin_name, download_info.version)
-
             return wheel_path
 
-        except requests.RequestException as e:
-            self._cleanup_failed_install(wheel_path)
-            raise DownloadError(f"Failed to download plugin: {e}") from e
         except SignatureVerificationError:
             self._cleanup_failed_install(wheel_path)
             raise

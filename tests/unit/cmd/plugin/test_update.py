@@ -33,7 +33,6 @@ class TestPluginUpdate:
         THEN it shows the available update
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -44,7 +43,6 @@ class TestPluginUpdate:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         mock_discovered_plugins = [
@@ -109,7 +107,6 @@ class TestPluginUpdate:
         THEN it shows everything is up to date
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -120,7 +117,6 @@ class TestPluginUpdate:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         mock_discovered_plugins = [
@@ -183,7 +179,6 @@ class TestPluginUpdate:
         THEN the plugin is updated
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -194,7 +189,6 @@ class TestPluginUpdate:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         mock_discovered_plugins = [
@@ -208,13 +202,8 @@ class TestPluginUpdate:
             ),
         ]
 
-        mock_download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
-            filename="tokenscanner-2.0.0.whl",
-            sha256="abc123",
-            version="2.0.0",
-            expires_at="2099-12-31T23:59:59Z",
-        )
+        mock_download_info = mock.MagicMock()
+        mock_download_info.version = "2.0.0"
 
         with (
             mock.patch(
@@ -271,9 +260,7 @@ class TestPluginUpdate:
         THEN it shows an error
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[],
-            features={},
         )
 
         with (
@@ -314,7 +301,6 @@ class TestPluginUpdate:
         THEN all plugins are updated
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="plugin1",
@@ -333,7 +319,6 @@ class TestPluginUpdate:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         mock_discovered_plugins = [
@@ -355,20 +340,10 @@ class TestPluginUpdate:
             ),
         ]
 
-        mock_download_info_1 = PluginDownloadInfo(
-            download_url="https://example.com/plugin1.whl",
-            filename="plugin1-2.0.0.whl",
-            sha256="abc123",
-            version="2.0.0",
-            expires_at="2099-12-31T23:59:59Z",
-        )
-        mock_download_info_2 = PluginDownloadInfo(
-            download_url="https://example.com/plugin2.whl",
-            filename="plugin2-3.0.0.whl",
-            sha256="def456",
-            version="3.0.0",
-            expires_at="2099-12-31T23:59:59Z",
-        )
+        mock_download_info_1 = mock.MagicMock()
+        mock_download_info_1.version = "2.0.0"
+        mock_download_info_2 = mock.MagicMock()
+        mock_download_info_2.version = "3.0.0"
 
         with (
             mock.patch(
@@ -543,9 +518,7 @@ class TestPluginUpdate:
         THEN it shows a message about no plugins
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[],
-            features={},
         )
 
         with (
@@ -590,7 +563,6 @@ class TestPluginUpdate:
         THEN it shows the plugin is up to date
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -601,7 +573,6 @@ class TestPluginUpdate:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         mock_discovered_plugins = [
@@ -658,7 +629,6 @@ class TestPluginUpdate:
         THEN it does NOT show an update (no downgrade)
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -669,7 +639,6 @@ class TestPluginUpdate:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         mock_discovered_plugins = [
@@ -735,7 +704,6 @@ class TestPluginUpdate:
         from ggshield.core.plugin.downloader import DownloadError
 
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -746,7 +714,6 @@ class TestPluginUpdate:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         mock_discovered_plugins = [
@@ -760,13 +727,8 @@ class TestPluginUpdate:
             ),
         ]
 
-        mock_download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
-            filename="tokenscanner-2.0.0.whl",
-            sha256="abc123",
-            version="2.0.0",
-            expires_at="2099-12-31T23:59:59Z",
-        )
+        mock_download_info = mock.MagicMock()
+        mock_download_info.version = "2.0.0"
 
         with (
             mock.patch(
@@ -819,7 +781,6 @@ class TestPluginUpdate:
         from ggshield.core.plugin.client import PluginNotAvailableError
 
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -830,7 +791,6 @@ class TestPluginUpdate:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         mock_discovered_plugins = [
@@ -892,7 +852,6 @@ class TestPluginUpdate:
         THEN it shows an error
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -903,7 +862,6 @@ class TestPluginUpdate:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         mock_discovered_plugins = [
@@ -917,13 +875,8 @@ class TestPluginUpdate:
             ),
         ]
 
-        mock_download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
-            filename="tokenscanner-2.0.0.whl",
-            sha256="abc123",
-            version="2.0.0",
-            expires_at="2099-12-31T23:59:59Z",
-        )
+        mock_download_info = mock.MagicMock()
+        mock_download_info.version = "2.0.0"
 
         with (
             mock.patch(
@@ -1025,9 +978,7 @@ class TestPluginUpdate:
         from ggshield.core.plugin.client import PluginSource, PluginSourceType
 
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[],
-            features={},
         )
 
         mock_discovered_plugins = [
