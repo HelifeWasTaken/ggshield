@@ -20,10 +20,12 @@ from ggshield.core.plugin.client import (
     PluginAPIClient,
     PluginAPIError,
     PluginNotAvailableError,
+    PluginsNotEnabledError,
     PluginSourceType,
 )
 from ggshield.core.plugin.downloader import DownloadError, PluginDownloader
 from ggshield.core.plugin.loader import PluginLoader
+from ggshield.core.plugin.platform import get_platform_info
 from ggshield.core.plugin.signature import SignatureVerificationMode
 from ggshield.core.text_utils import pluralize
 
@@ -191,6 +193,13 @@ def update_cmd(
                         }
                     )
 
+        except PluginsNotEnabledError:
+            ui.display_error(
+                "Plugin system is not available on this workspace. "
+                "Contact your administrator."
+            )
+            ctx.exit(ExitCode.UNEXPECTED_ERROR)
+            return
         except PluginAPIError as e:
             ui.display_error(str(e))
             ctx.exit(ExitCode.UNEXPECTED_ERROR)
@@ -292,15 +301,21 @@ def update_cmd(
 
             if source_type == PluginSourceType.PLATFORM:
                 assert plugin_api_client is not None
-                # Get download info from API
-                download_info = plugin_api_client.get_download_info(
-                    name, version=latest_version
-                )
-
-                # Download and install (overwrites existing)
-                downloader.download_and_install(
-                    download_info, name, signature_mode=signature_mode
-                )
+                platform_info = get_platform_info()
+                with plugin_api_client.download_plugin(
+                    name,
+                    platform_info=platform_info,
+                    version=latest_version,
+                ) as (info, chunks):
+                    downloader.download_and_install(
+                        info, chunks, name, signature_mode=signature_mode
+                    )
+                try:
+                    plugin_api_client.report_installation(
+                        name, info.version, platform_info.os, platform_info.arch
+                    )
+                except Exception:
+                    pass  # analytics is best-effort
                 updated = True
 
             elif source_type == PluginSourceType.GITHUB_RELEASE:

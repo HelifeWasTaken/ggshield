@@ -18,8 +18,10 @@ from ggshield.core.plugin.client import (
     PluginAPIClient,
     PluginAPIError,
     PluginNotAvailableError,
+    PluginsNotEnabledError,
     PluginSourceType,
 )
+from ggshield.core.plugin.platform import get_platform_info
 from ggshield.core.plugin.downloader import (
     ChecksumMismatchError,
     DownloadError,
@@ -153,28 +155,36 @@ def _install_from_gitguardian(
     version: Optional[str],
     signature_mode: SignatureVerificationMode = SignatureVerificationMode.STRICT,
 ) -> None:
-    """Install a plugin from GitGuardian API."""
+    """Install a plugin from the GitGuardian platform."""
     ctx_obj = ContextObj.get(ctx)
     config = ctx_obj.config
 
-    # Fetch available plugins
     try:
         client = create_client_from_config(config)
         plugin_api_client = PluginAPIClient(client)
         catalog = plugin_api_client.get_available_plugins()
+    except PluginsNotEnabledError:
+        ui.display_error(
+            "Plugin system is not available on this workspace. "
+            "Contact your administrator."
+        )
+        ctx.exit(ExitCode.UNEXPECTED_ERROR)
+        return
     except PluginAPIError as e:
         ui.display_error(str(e))
         ctx.exit(ExitCode.UNEXPECTED_ERROR)
+        return
     except Exception as e:
         ui.display_error(f"Failed to connect to GitGuardian: {e}")
         ctx.exit(ExitCode.UNEXPECTED_ERROR)
+        return
 
-    # Check if plugin is available
     available_plugins = {p.name: p for p in catalog.plugins if p.available}
 
     if plugin_name not in available_plugins:
-        # Check if plugin exists but is not available
-        unavailable = next((p for p in catalog.plugins if p.name == plugin_name), None)
+        unavailable = next(
+            (p for p in catalog.plugins if p.name == plugin_name), None
+        )
         if unavailable:
             ui.display_error(
                 f"Plugin '{plugin_name}' is not available for your account"
@@ -185,31 +195,25 @@ def _install_from_gitguardian(
             ui.display_error(f"Unknown plugin: {plugin_name}")
             ui.display_info("Use 'ggshield plugin status' to see available plugins")
         ctx.exit(ExitCode.USAGE_ERROR)
+        return
 
-    # Install the plugin
     downloader = PluginDownloader()
     enterprise_config = EnterpriseConfig.load()
+    platform_info = get_platform_info()
 
     ui.display_info(f"Installing {plugin_name}...")
 
     try:
-        # Get download info
-        download_info = plugin_api_client.get_download_info(
-            plugin_name, version=version
-        )
+        with plugin_api_client.download_plugin(
+            plugin_name, platform_info=platform_info, version=version
+        ) as (info, chunks):
+            downloader.download_and_install(
+                info, chunks, plugin_name, signature_mode=signature_mode
+            )
 
-        # Download and install
-        downloader.download_and_install(
-            download_info, plugin_name, signature_mode=signature_mode
-        )
-
-        # Enable in config
-        enterprise_config.enable_plugin(plugin_name, version=download_info.version)
-
-        # Save config
+        enterprise_config.enable_plugin(plugin_name, version=info.version)
         enterprise_config.save()
-
-        ui.display_info(f"Installed {plugin_name} v{download_info.version}")
+        ui.display_info(f"Installed {plugin_name} v{info.version}")
 
     except SignatureVerificationError as e:
         ui.display_error(f"Signature verification failed for {plugin_name}: {e}")
@@ -222,12 +226,22 @@ def _install_from_gitguardian(
     except PluginNotAvailableError as e:
         ui.display_error(f"Failed to install {plugin_name}: {e}")
         ctx.exit(ExitCode.UNEXPECTED_ERROR)
+        return
     except DownloadError as e:
         ui.display_error(f"Failed to install {plugin_name}: {e}")
         ctx.exit(ExitCode.UNEXPECTED_ERROR)
+        return
     except Exception as e:
         ui.display_error(f"Failed to install {plugin_name}: {e}")
         ctx.exit(ExitCode.UNEXPECTED_ERROR)
+        return
+
+    try:
+        plugin_api_client.report_installation(
+            plugin_name, info.version, platform_info.os, platform_info.arch
+        )
+    except Exception:
+        pass  # analytics is best-effort
 
 
 def _install_from_local_wheel(

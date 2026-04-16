@@ -2,6 +2,7 @@
 Tests for the enterprise update command.
 """
 
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -9,7 +10,6 @@ from ggshield.__main__ import cli
 from ggshield.core.errors import ExitCode
 from ggshield.core.plugin.client import PluginCatalog, PluginDownloadInfo, PluginInfo
 from ggshield.core.plugin.loader import DiscoveredPlugin
-from ggshield.core.plugin.signature import SignatureVerificationMode
 
 
 class TestPluginUpdate:
@@ -202,8 +202,16 @@ class TestPluginUpdate:
             ),
         ]
 
-        mock_download_info = mock.MagicMock()
-        mock_download_info.version = "2.0.0"
+        mock_info = PluginDownloadInfo(
+            filename="tokenscanner-2.0.0-py3-none-any.whl",
+            sha256="abc123",
+            version="2.0.0",
+            size_bytes=100,
+        )
+
+        @contextmanager
+        def fake_download_plugin(*args, **kwargs):
+            yield mock_info, iter([b""])
 
         with (
             mock.patch(
@@ -225,7 +233,7 @@ class TestPluginUpdate:
 
             mock_plugin_api_client = mock.MagicMock()
             mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.return_value = mock_download_info
+            mock_plugin_api_client.download_plugin = fake_download_plugin
             mock_plugin_api_client_class.return_value = mock_plugin_api_client
 
             mock_config = mock.MagicMock()
@@ -252,6 +260,9 @@ class TestPluginUpdate:
         assert "Updated tokenscanner to v2.0.0" in result.output
         mock_downloader.download_and_install.assert_called_once()
         mock_config.save.assert_called_once()
+        mock_plugin_api_client.report_installation.assert_called_once_with(
+            "tokenscanner", "2.0.0", mock.ANY, mock.ANY
+        )
 
     def test_update_not_installed(self, cli_fs_runner):
         """
@@ -340,10 +351,23 @@ class TestPluginUpdate:
             ),
         ]
 
-        mock_download_info_1 = mock.MagicMock()
-        mock_download_info_1.version = "2.0.0"
-        mock_download_info_2 = mock.MagicMock()
-        mock_download_info_2.version = "3.0.0"
+        mock_info_1 = PluginDownloadInfo(
+            filename="plugin1-2.0.0-py3-none-any.whl",
+            sha256="hash1",
+            version="2.0.0",
+            size_bytes=100,
+        )
+        mock_info_2 = PluginDownloadInfo(
+            filename="plugin2-3.0.0-py3-none-any.whl",
+            sha256="hash2",
+            version="3.0.0",
+            size_bytes=200,
+        )
+        _infos = iter([mock_info_1, mock_info_2])
+
+        @contextmanager
+        def fake_download_plugin(*args, **kwargs):
+            yield next(_infos), iter([b""])
 
         with (
             mock.patch(
@@ -365,10 +389,7 @@ class TestPluginUpdate:
 
             mock_plugin_api_client = mock.MagicMock()
             mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.side_effect = [
-                mock_download_info_1,
-                mock_download_info_2,
-            ]
+            mock_plugin_api_client.download_plugin = fake_download_plugin
             mock_plugin_api_client_class.return_value = mock_plugin_api_client
 
             mock_config = mock.MagicMock()
@@ -394,6 +415,13 @@ class TestPluginUpdate:
         assert "Updating plugin2" in result.output
         assert "2 plugins updated successfully" in result.output
         assert mock_downloader.download_and_install.call_count == 2
+        assert mock_plugin_api_client.report_installation.call_count == 2
+        mock_plugin_api_client.report_installation.assert_any_call(
+            "plugin1", "2.0.0", mock.ANY, mock.ANY
+        )
+        mock_plugin_api_client.report_installation.assert_any_call(
+            "plugin2", "3.0.0", mock.ANY, mock.ANY
+        )
 
     def test_update_api_error(self, cli_fs_runner):
         """
@@ -727,8 +755,16 @@ class TestPluginUpdate:
             ),
         ]
 
-        mock_download_info = mock.MagicMock()
-        mock_download_info.version = "2.0.0"
+        mock_info = PluginDownloadInfo(
+            filename="tokenscanner-2.0.0-py3-none-any.whl",
+            sha256="abc123",
+            version="2.0.0",
+            size_bytes=100,
+        )
+
+        @contextmanager
+        def fake_download_plugin(*args, **kwargs):
+            yield mock_info, iter([b""])
 
         with (
             mock.patch(
@@ -750,7 +786,7 @@ class TestPluginUpdate:
 
             mock_plugin_api_client = mock.MagicMock()
             mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.return_value = mock_download_info
+            mock_plugin_api_client.download_plugin = fake_download_plugin
             mock_plugin_api_client_class.return_value = mock_plugin_api_client
 
             mock_config = mock.MagicMock()
@@ -822,11 +858,14 @@ class TestPluginUpdate:
             mock_client = mock.MagicMock()
             mock_create_client.return_value = mock_client
 
+            @contextmanager
+            def fake_download_plugin_raises(*args, **kwargs):
+                raise PluginNotAvailableError("tokenscanner", "Upgrade required")
+                yield  # make it a generator
+
             mock_plugin_api_client = mock.MagicMock()
             mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.side_effect = (
-                PluginNotAvailableError("tokenscanner", "Upgrade required")
-            )
+            mock_plugin_api_client.download_plugin = fake_download_plugin_raises
             mock_plugin_api_client_class.return_value = mock_plugin_api_client
 
             mock_config = mock.MagicMock()
@@ -875,9 +914,6 @@ class TestPluginUpdate:
             ),
         ]
 
-        mock_download_info = mock.MagicMock()
-        mock_download_info.version = "2.0.0"
-
         with (
             mock.patch(
                 "ggshield.cmd.plugin.update.create_client_from_config"
@@ -896,9 +932,20 @@ class TestPluginUpdate:
             mock_client = mock.MagicMock()
             mock_create_client.return_value = mock_client
 
+            mock_info = PluginDownloadInfo(
+                filename="tokenscanner-2.0.0-py3-none-any.whl",
+                sha256="abc123",
+                version="2.0.0",
+                size_bytes=100,
+            )
+
+            @contextmanager
+            def fake_download_plugin(*args, **kwargs):
+                yield mock_info, iter([b""])
+
             mock_plugin_api_client = mock.MagicMock()
             mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.return_value = mock_download_info
+            mock_plugin_api_client.download_plugin = fake_download_plugin
             mock_plugin_api_client_class.return_value = mock_plugin_api_client
 
             mock_config = mock.MagicMock()
@@ -1041,26 +1088,13 @@ class TestPluginUpdate:
         assert "localplugin" in result.output
         assert "local_file" in result.output
 
-    def test_update_default_signature_mode_is_strict(self, cli_fs_runner):
+    def test_update_plugins_not_enabled_exits_cleanly(self, cli_fs_runner):
         """
-        GIVEN no --allow-unsigned flag
-        WHEN running 'ggshield plugin update <plugin>'
-        THEN download_and_install is called with signature_mode=STRICT
+        GIVEN the platform has plugins disabled
+        WHEN running 'ggshield plugin update --all'
+        THEN it exits with a clean error (not a stack trace)
         """
-        mock_catalog = PluginCatalog(
-            plan="Enterprise",
-            plugins=[
-                PluginInfo(
-                    name="tokenscanner",
-                    display_name="Token Scanner",
-                    description="Local secret scanning",
-                    available=True,
-                    latest_version="2.0.0",
-                    reason=None,
-                ),
-            ],
-            features={},
-        )
+        from ggshield.core.plugin.client import PluginsNotEnabledError
 
         mock_discovered_plugins = [
             DiscoveredPlugin(
@@ -1073,14 +1107,6 @@ class TestPluginUpdate:
             ),
         ]
 
-        mock_download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
-            filename="tokenscanner-2.0.0.whl",
-            sha256="abc123",
-            version="2.0.0",
-            expires_at="2099-12-31T23:59:59Z",
-        )
-
         with (
             mock.patch(
                 "ggshield.cmd.plugin.update.create_client_from_config"
@@ -1091,17 +1117,19 @@ class TestPluginUpdate:
             mock.patch(
                 "ggshield.cmd.plugin.update.EnterpriseConfig"
             ) as mock_config_class,
-            mock.patch("ggshield.cmd.plugin.update.PluginLoader") as mock_loader_class,
+            mock.patch(
+                "ggshield.cmd.plugin.update.PluginLoader"
+            ) as mock_loader_class,
             mock.patch(
                 "ggshield.cmd.plugin.update.PluginDownloader"
             ) as mock_downloader_class,
         ):
-            mock_client = mock.MagicMock()
-            mock_create_client.return_value = mock_client
+            mock_create_client.return_value = mock.MagicMock()
 
             mock_plugin_api_client = mock.MagicMock()
-            mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.return_value = mock_download_info
+            mock_plugin_api_client.get_available_plugins.side_effect = (
+                PluginsNotEnabledError()
+            )
             mock_plugin_api_client_class.return_value = mock_plugin_api_client
 
             mock_config_class.load.return_value = mock.MagicMock()
@@ -1114,174 +1142,11 @@ class TestPluginUpdate:
             mock_downloader.get_plugin_source.return_value = None
             mock_downloader_class.return_value = mock_downloader
 
-            result = cli_fs_runner.invoke(
-                cli,
-                ["plugin", "update", "tokenscanner"],
-                catch_exceptions=False,
-            )
+            result = cli_fs_runner.invoke(cli, ["plugin", "update", "--all"])
 
-        assert result.exit_code == ExitCode.SUCCESS
-        mock_downloader.download_and_install.assert_called_once()
-        call_kwargs = mock_downloader.download_and_install.call_args
-        assert call_kwargs.kwargs["signature_mode"] == SignatureVerificationMode.STRICT
-
-    def test_update_allow_unsigned_overrides_to_warn(self, cli_fs_runner):
-        """
-        GIVEN --allow-unsigned
-        WHEN running 'ggshield plugin update --allow-unsigned <plugin>'
-        THEN download_and_install is called with signature_mode=WARN
-        """
-        mock_catalog = PluginCatalog(
-            plan="Enterprise",
-            plugins=[
-                PluginInfo(
-                    name="tokenscanner",
-                    display_name="Token Scanner",
-                    description="Local secret scanning",
-                    available=True,
-                    latest_version="2.0.0",
-                    reason=None,
-                ),
-            ],
-            features={},
-        )
-
-        mock_discovered_plugins = [
-            DiscoveredPlugin(
-                name="tokenscanner",
-                entry_point=None,
-                wheel_path=Path("/path/to/wheel"),
-                is_installed=True,
-                is_enabled=True,
-                version="1.0.0",
-            ),
-        ]
-
-        mock_download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
-            filename="tokenscanner-2.0.0.whl",
-            sha256="abc123",
-            version="2.0.0",
-            expires_at="2099-12-31T23:59:59Z",
-        )
-
-        with (
-            mock.patch(
-                "ggshield.cmd.plugin.update.create_client_from_config"
-            ) as mock_create_client,
-            mock.patch(
-                "ggshield.cmd.plugin.update.PluginAPIClient"
-            ) as mock_plugin_api_client_class,
-            mock.patch(
-                "ggshield.cmd.plugin.update.EnterpriseConfig"
-            ) as mock_config_class,
-            mock.patch("ggshield.cmd.plugin.update.PluginLoader") as mock_loader_class,
-            mock.patch(
-                "ggshield.cmd.plugin.update.PluginDownloader"
-            ) as mock_downloader_class,
-        ):
-            mock_client = mock.MagicMock()
-            mock_create_client.return_value = mock_client
-
-            mock_plugin_api_client = mock.MagicMock()
-            mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.return_value = mock_download_info
-            mock_plugin_api_client_class.return_value = mock_plugin_api_client
-
-            mock_config_class.load.return_value = mock.MagicMock()
-
-            mock_loader = mock.MagicMock()
-            mock_loader.discover_plugins.return_value = mock_discovered_plugins
-            mock_loader_class.return_value = mock_loader
-
-            mock_downloader = mock.MagicMock()
-            mock_downloader.get_plugin_source.return_value = None
-            mock_downloader_class.return_value = mock_downloader
-
-            result = cli_fs_runner.invoke(
-                cli,
-                ["plugin", "update", "--allow-unsigned", "tokenscanner"],
-                catch_exceptions=False,
-            )
-
-        assert result.exit_code == ExitCode.SUCCESS
-        mock_downloader.download_and_install.assert_called_once()
-        call_kwargs = mock_downloader.download_and_install.call_args
-        assert call_kwargs.kwargs["signature_mode"] == SignatureVerificationMode.WARN
-
-    def test_update_github_release_default_signature_mode_is_strict(
-        self, cli_fs_runner
-    ):
-        """
-        GIVEN a plugin from GitHub release with an update available
-        WHEN running 'ggshield plugin update <plugin>'
-        THEN download_from_github_release is called with signature_mode=STRICT
-        """
-        from ggshield.core.plugin.client import PluginSource, PluginSourceType
-
-        mock_discovered_plugins = [
-            DiscoveredPlugin(
-                name="ghplugin",
-                entry_point=None,
-                wheel_path=Path("/path/to/wheel"),
-                is_installed=True,
-                is_enabled=True,
-                version="1.0.0",
-            ),
-        ]
-
-        mock_source = PluginSource(
-            type=PluginSourceType.GITHUB_RELEASE,
-            github_repo="owner/repo",
-        )
-
-        mock_release = {
-            "tag_name": "v2.0.0",
-            "assets": [
-                {
-                    "name": "ghplugin-2.0.0-py3-none-any.whl",
-                    "browser_download_url": "https://github.com/owner/repo/releases/download/v2.0.0/ghplugin.whl",
-                },
-            ],
-        }
-
-        with (
-            mock.patch(
-                "ggshield.cmd.plugin.update.EnterpriseConfig"
-            ) as mock_config_class,
-            mock.patch("ggshield.cmd.plugin.update.PluginLoader") as mock_loader_class,
-            mock.patch(
-                "ggshield.cmd.plugin.update.PluginDownloader"
-            ) as mock_downloader_class,
-            mock.patch(
-                "ggshield.cmd.plugin.update._check_github_release_update",
-                return_value=mock_release,
-            ),
-            mock.patch(
-                "ggshield.cmd.plugin.update._find_wheel_asset",
-                return_value="https://github.com/owner/repo/releases/download/v2.0.0/ghplugin.whl",
-            ),
-        ):
-            mock_config_class.load.return_value = mock.MagicMock()
-
-            mock_loader = mock.MagicMock()
-            mock_loader.discover_plugins.return_value = mock_discovered_plugins
-            mock_loader_class.return_value = mock_loader
-
-            mock_downloader = mock.MagicMock()
-            mock_downloader.get_plugin_source.return_value = mock_source
-            mock_downloader_class.return_value = mock_downloader
-
-            result = cli_fs_runner.invoke(
-                cli,
-                ["plugin", "update", "ghplugin"],
-                catch_exceptions=False,
-            )
-
-        assert result.exit_code == ExitCode.SUCCESS
-        mock_downloader.download_from_github_release.assert_called_once()
-        call_kwargs = mock_downloader.download_from_github_release.call_args
-        assert call_kwargs.kwargs["signature_mode"] == SignatureVerificationMode.STRICT
+        assert result.exit_code == ExitCode.UNEXPECTED_ERROR
+        assert "not available" in result.output.lower()
+        assert "administrator" in result.output.lower()
 
 
 class TestUpdateHelperFunctions:

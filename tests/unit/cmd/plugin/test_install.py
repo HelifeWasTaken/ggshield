@@ -2,10 +2,9 @@
 Tests for the enterprise install command.
 """
 
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
-
-import pytest
 
 from ggshield.__main__ import cli
 from ggshield.cmd.plugin.install import detect_source_type
@@ -15,12 +14,6 @@ from ggshield.core.plugin.client import (
     PluginDownloadInfo,
     PluginInfo,
     PluginSourceType,
-)
-from ggshield.core.plugin.downloader import ChecksumMismatchError, DownloadError
-from ggshield.core.plugin.signature import (
-    SignatureStatus,
-    SignatureVerificationError,
-    SignatureVerificationMode,
 )
 
 
@@ -42,7 +35,7 @@ class TestPluginInstall:
         """
         GIVEN a plugin is available
         WHEN running 'ggshield plugin install <plugin>'
-        THEN the plugin is downloaded and installed
+        THEN the plugin is downloaded and installed via streaming
         """
         mock_catalog = PluginCatalog(
             plugins=[
@@ -56,9 +49,16 @@ class TestPluginInstall:
                 ),
             ],
         )
+        mock_info = PluginDownloadInfo(
+            filename="tokenscanner-1.0.0-py3-none-any.whl",
+            sha256="abc123",
+            version="1.0.0",
+            size_bytes=100,
+        )
 
-        mock_download_info = mock.MagicMock()
-        mock_download_info.version = "1.0.0"
+        @contextmanager
+        def fake_download_plugin(*args, **kwargs):
+            yield mock_info, iter([b"wheel-data"])
 
         with (
             mock.patch(
@@ -74,12 +74,11 @@ class TestPluginInstall:
                 "ggshield.cmd.plugin.install.EnterpriseConfig"
             ) as mock_config_class,
         ):
-            mock_client = mock.MagicMock()
-            mock_create_client.return_value = mock_client
+            mock_create_client.return_value = mock.MagicMock()
 
             mock_plugin_api_client = mock.MagicMock()
             mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.return_value = mock_download_info
+            mock_plugin_api_client.download_plugin = fake_download_plugin
             mock_plugin_api_client_class.return_value = mock_plugin_api_client
 
             mock_downloader = mock.MagicMock()
@@ -98,21 +97,118 @@ class TestPluginInstall:
         assert "Installing tokenscanner" in result.output
         assert "Installed tokenscanner v1.0.0" in result.output
         mock_downloader.download_and_install.assert_called_once()
-        call_args = mock_downloader.download_and_install.call_args
-        assert call_args[0] == (mock_download_info, "tokenscanner")
-        mock_config.enable_plugin.assert_called_once_with(
-            "tokenscanner", version="1.0.0"
+        mock_plugin_api_client.report_installation.assert_called_once_with(
+            "tokenscanner", "1.0.0", mock.ANY, mock.ANY
         )
+        mock_config.enable_plugin.assert_called_once_with("tokenscanner", version="1.0.0")
         mock_config.save.assert_called_once()
 
-    @pytest.mark.parametrize(
-        "reason",
-        [
-            pytest.param("Requires Business plan", id="with_reason"),
-            pytest.param(None, id="without_reason"),
-        ],
-    )
-    def test_install_unavailable_plugin(self, cli_fs_runner, reason):
+    def test_install_plugins_not_enabled(self, cli_fs_runner):
+        """
+        GIVEN the platform has plugins disabled (feature flag OFF)
+        WHEN running 'ggshield plugin install tokenscanner'
+        THEN it shows a clean error message about workspace configuration
+        """
+        from ggshield.core.plugin.client import PluginsNotEnabledError
+
+        with (
+            mock.patch(
+                "ggshield.cmd.plugin.install.create_client_from_config"
+            ) as mock_create_client,
+            mock.patch(
+                "ggshield.cmd.plugin.install.PluginAPIClient"
+            ) as mock_plugin_api_client_class,
+        ):
+            mock_create_client.return_value = mock.MagicMock()
+            mock_plugin_api_client = mock.MagicMock()
+            mock_plugin_api_client.get_available_plugins.side_effect = (
+                PluginsNotEnabledError()
+            )
+            mock_plugin_api_client_class.return_value = mock_plugin_api_client
+
+            result = cli_fs_runner.invoke(
+                cli, ["plugin", "install", "tokenscanner"]
+            )
+
+        assert result.exit_code == ExitCode.UNEXPECTED_ERROR
+        assert "not available" in result.output.lower()
+        assert "administrator" in result.output.lower()
+
+    def test_install_calls_report_installation_after_success(
+        self, cli_fs_runner
+    ):
+        """
+        GIVEN a successful plugin install
+        WHEN running 'ggshield plugin install tokenscanner'
+        THEN report_installation is called (best-effort analytics)
+        """
+        mock_catalog = PluginCatalog(
+            plugins=[
+                PluginInfo(
+                    name="tokenscanner",
+                    display_name="Token Scanner",
+                    description="Local secret scanning",
+                    available=True,
+                    latest_version="1.0.0",
+                    reason=None,
+                ),
+            ],
+        )
+        mock_info = PluginDownloadInfo(
+            filename="tokenscanner-1.0.0-py3-none-any.whl",
+            sha256="abc123",
+            version="1.0.0",
+            size_bytes=100,
+        )
+
+        @contextmanager
+        def fake_download_plugin(*args, **kwargs):
+            yield mock_info, iter([b""])
+
+        with (
+            mock.patch(
+                "ggshield.cmd.plugin.install.create_client_from_config"
+            ) as mock_create_client,
+            mock.patch(
+                "ggshield.cmd.plugin.install.PluginAPIClient"
+            ) as mock_plugin_api_client_class,
+            mock.patch(
+                "ggshield.cmd.plugin.install.PluginDownloader"
+            ) as mock_downloader_class,
+            mock.patch(
+                "ggshield.cmd.plugin.install.EnterpriseConfig"
+            ) as mock_config_class,
+        ):
+            mock_create_client.return_value = mock.MagicMock()
+
+            mock_plugin_api_client = mock.MagicMock()
+            mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
+            mock_plugin_api_client.download_plugin = fake_download_plugin
+            mock_plugin_api_client_class.return_value = mock_plugin_api_client
+
+            mock_downloader = mock.MagicMock()
+            mock_downloader_class.return_value = mock_downloader
+
+            mock_config = mock.MagicMock()
+            mock_config_class.load.return_value = mock_config
+
+            result = cli_fs_runner.invoke(
+                cli,
+                ["plugin", "install", "tokenscanner"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == ExitCode.SUCCESS
+        mock_plugin_api_client.report_installation.assert_called_once_with(
+            "tokenscanner", "1.0.0", mock.ANY, mock.ANY
+        )
+
+    def test_install_unavailable_plugin(self, cli_fs_runner):
+        """
+        GIVEN a plugin exists but is not available
+        WHEN running 'ggshield plugin install <plugin>'
+        THEN it shows an error with reason
+        """
         mock_catalog = PluginCatalog(
             plugins=[
                 PluginInfo(
@@ -121,7 +217,7 @@ class TestPluginInstall:
                     description="Local secret scanning",
                     available=False,
                     latest_version="1.0.0",
-                    reason=reason,
+                    reason="Requires Business plan",
                 ),
             ],
         )
@@ -145,10 +241,7 @@ class TestPluginInstall:
 
         assert result.exit_code == ExitCode.USAGE_ERROR
         assert "not available" in result.output
-        if reason:
-            assert reason in result.output
-        else:
-            assert "Reason:" not in result.output
+        assert "Requires Business plan" in result.output
 
     def test_install_unknown_plugin(self, cli_fs_runner):
         """
@@ -199,9 +292,18 @@ class TestPluginInstall:
                 ),
             ],
         )
+        mock_info = PluginDownloadInfo(
+            filename="tokenscanner-1.5.0-py3-none-any.whl",
+            sha256="abc123",
+            version="1.5.0",
+            size_bytes=100,
+        )
+        captured_kwargs: dict = {}
 
-        mock_download_info = mock.MagicMock()
-        mock_download_info.version = "1.0.0"
+        @contextmanager
+        def fake_download_plugin(*args, **kwargs):
+            captured_kwargs.update(kwargs)
+            yield mock_info, iter([b""])
 
         with (
             mock.patch(
@@ -217,12 +319,11 @@ class TestPluginInstall:
                 "ggshield.cmd.plugin.install.EnterpriseConfig"
             ) as mock_config_class,
         ):
-            mock_client = mock.MagicMock()
-            mock_create_client.return_value = mock_client
+            mock_create_client.return_value = mock.MagicMock()
 
             mock_plugin_api_client = mock.MagicMock()
             mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.return_value = mock_download_info
+            mock_plugin_api_client.download_plugin = fake_download_plugin
             mock_plugin_api_client_class.return_value = mock_plugin_api_client
 
             mock_downloader = mock.MagicMock()
@@ -238,9 +339,7 @@ class TestPluginInstall:
             )
 
         assert result.exit_code == ExitCode.SUCCESS
-        mock_plugin_api_client.get_download_info.assert_called_once_with(
-            "tokenscanner", version="1.5.0"
-        )
+        assert captured_kwargs.get("version") == "1.5.0"
 
     def test_install_download_error(self, cli_fs_runner):
         """
@@ -248,6 +347,8 @@ class TestPluginInstall:
         WHEN running 'ggshield plugin install <plugin>'
         THEN it shows an error
         """
+        from ggshield.core.plugin.downloader import DownloadError
+
         mock_catalog = PluginCatalog(
             plugins=[
                 PluginInfo(
@@ -261,8 +362,16 @@ class TestPluginInstall:
             ],
         )
 
-        mock_download_info = mock.MagicMock()
-        mock_download_info.version = "1.0.0"
+        mock_info = PluginDownloadInfo(
+            filename="tokenscanner-1.0.0-py3-none-any.whl",
+            sha256="abc123",
+            version="1.0.0",
+            size_bytes=100,
+        )
+
+        @contextmanager
+        def fake_download_plugin(*args, **kwargs):
+            yield mock_info, iter([b""])
 
         with (
             mock.patch(
@@ -278,12 +387,11 @@ class TestPluginInstall:
                 "ggshield.cmd.plugin.install.EnterpriseConfig"
             ) as mock_config_class,
         ):
-            mock_client = mock.MagicMock()
-            mock_create_client.return_value = mock_client
+            mock_create_client.return_value = mock.MagicMock()
 
             mock_plugin_api_client = mock.MagicMock()
             mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.return_value = mock_download_info
+            mock_plugin_api_client.download_plugin = fake_download_plugin
             mock_plugin_api_client_class.return_value = mock_plugin_api_client
 
             mock_downloader = mock.MagicMock()
@@ -361,7 +469,7 @@ class TestPluginInstall:
 
     def test_install_plugin_not_available_error(self, cli_fs_runner):
         """
-        GIVEN getting download info fails with PluginNotAvailableError
+        GIVEN downloading raises PluginNotAvailableError
         WHEN running 'ggshield plugin install <plugin>'
         THEN it shows an error
         """
@@ -380,6 +488,11 @@ class TestPluginInstall:
             ],
         )
 
+        @contextmanager
+        def fake_download_plugin(*args, **kwargs):
+            raise PluginNotAvailableError("tokenscanner", "Version not found")
+            yield  # make it a generator
+
         with (
             mock.patch(
                 "ggshield.cmd.plugin.install.create_client_from_config"
@@ -394,14 +507,11 @@ class TestPluginInstall:
                 "ggshield.cmd.plugin.install.EnterpriseConfig"
             ) as mock_config_class,
         ):
-            mock_client = mock.MagicMock()
-            mock_create_client.return_value = mock_client
+            mock_create_client.return_value = mock.MagicMock()
 
             mock_plugin_api_client = mock.MagicMock()
             mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.side_effect = (
-                PluginNotAvailableError("tokenscanner", "Version not found")
-            )
+            mock_plugin_api_client.download_plugin = fake_download_plugin
             mock_plugin_api_client_class.return_value = mock_plugin_api_client
 
             mock_downloader = mock.MagicMock()
@@ -433,9 +543,16 @@ class TestPluginInstall:
                 ),
             ],
         )
+        mock_info = PluginDownloadInfo(
+            filename="tokenscanner-1.0.0-py3-none-any.whl",
+            sha256="abc123",
+            version="1.0.0",
+            size_bytes=100,
+        )
 
-        mock_download_info = mock.MagicMock()
-        mock_download_info.version = "1.0.0"
+        @contextmanager
+        def fake_download_plugin(*args, **kwargs):
+            yield mock_info, iter([b""])
 
         with (
             mock.patch(
@@ -451,12 +568,11 @@ class TestPluginInstall:
                 "ggshield.cmd.plugin.install.EnterpriseConfig"
             ) as mock_config_class,
         ):
-            mock_client = mock.MagicMock()
-            mock_create_client.return_value = mock_client
+            mock_create_client.return_value = mock.MagicMock()
 
             mock_plugin_api_client = mock.MagicMock()
             mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.return_value = mock_download_info
+            mock_plugin_api_client.download_plugin = fake_download_plugin
             mock_plugin_api_client_class.return_value = mock_plugin_api_client
 
             mock_downloader = mock.MagicMock()
@@ -597,7 +713,7 @@ class TestInstallFromLocalWheel:
 
             result = cli_fs_runner.invoke(
                 cli,
-                ["plugin", "install", str(wheel_path)],
+                ["plugin", "install", str(wheel_path), "--force"],
                 catch_exceptions=False,
             )
 
@@ -605,6 +721,47 @@ class TestInstallFromLocalWheel:
         assert "Installed myplugin v1.0.0" in result.output
         mock_downloader.install_from_wheel.assert_called_once()
         mock_config.enable_plugin.assert_called_once_with("myplugin", version="1.0.0")
+
+    def test_install_local_wheel_warning(self, cli_fs_runner, tmp_path: Path) -> None:
+        """
+        GIVEN a valid local wheel file without --force
+        WHEN running 'ggshield plugin install <path>'
+        THEN a warning is displayed
+        """
+        wheel_path = tmp_path / "myplugin-1.0.0.whl"
+        wheel_path.touch()
+
+        with (
+            mock.patch(
+                "ggshield.cmd.plugin.install.PluginDownloader"
+            ) as mock_downloader_class,
+            mock.patch(
+                "ggshield.cmd.plugin.install.EnterpriseConfig"
+            ) as mock_config_class,
+            mock.patch(
+                "ggshield.cmd.plugin.install.detect_source_type",
+                return_value=PluginSourceType.LOCAL_FILE,
+            ),
+        ):
+            mock_downloader = mock.MagicMock()
+            mock_downloader.install_from_wheel.return_value = (
+                "myplugin",
+                "1.0.0",
+                wheel_path,
+            )
+            mock_downloader_class.return_value = mock_downloader
+
+            mock_config = mock.MagicMock()
+            mock_config_class.load.return_value = mock_config
+
+            result = cli_fs_runner.invoke(
+                cli,
+                ["plugin", "install", str(wheel_path)],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == ExitCode.SUCCESS
+        assert "not from GitGuardian" in result.output
 
 
 class TestInstallFromUrl:
@@ -647,15 +804,54 @@ class TestInstallFromUrl:
                     "https://example.com/plugin.whl",
                     "--sha256",
                     "abc123",
+                    "--force",
                 ],
                 catch_exceptions=False,
             )
 
         assert result.exit_code == ExitCode.SUCCESS
         assert "Installed urlplugin v2.0.0" in result.output
-        mock_downloader.download_from_url.assert_called_once()
-        call_args = mock_downloader.download_from_url.call_args
-        assert call_args[0] == ("https://example.com/plugin.whl", "abc123")
+        mock_downloader.download_from_url.assert_called_once_with(
+            "https://example.com/plugin.whl", "abc123", True
+        )
+
+    def test_install_url_warning_no_sha256(self, cli_fs_runner) -> None:
+        """
+        GIVEN a URL without SHA256 checksum
+        WHEN running 'ggshield plugin install <url>' without --force
+        THEN a warning about missing checksum is displayed
+        """
+        with (
+            mock.patch(
+                "ggshield.cmd.plugin.install.PluginDownloader"
+            ) as mock_downloader_class,
+            mock.patch(
+                "ggshield.cmd.plugin.install.EnterpriseConfig"
+            ) as mock_config_class,
+            mock.patch(
+                "ggshield.cmd.plugin.install.detect_source_type",
+                return_value=PluginSourceType.URL,
+            ),
+        ):
+            mock_downloader = mock.MagicMock()
+            mock_downloader.download_from_url.return_value = (
+                "urlplugin",
+                "2.0.0",
+                Path("/fake/path.whl"),
+            )
+            mock_downloader_class.return_value = mock_downloader
+
+            mock_config = mock.MagicMock()
+            mock_config_class.load.return_value = mock_config
+
+            result = cli_fs_runner.invoke(
+                cli,
+                ["plugin", "install", "https://example.com/plugin.whl"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == ExitCode.SUCCESS
+        assert "No SHA256 checksum provided" in result.output
 
     def test_install_http_url_rejected(self, cli_fs_runner) -> None:
         """
@@ -688,7 +884,7 @@ class TestInstallFromUrl:
 
             result = cli_fs_runner.invoke(
                 cli,
-                ["plugin", "install", "http://example.com/plugin.whl"],
+                ["plugin", "install", "http://example.com/plugin.whl", "--force"],
             )
 
         assert result.exit_code == ExitCode.USAGE_ERROR
@@ -733,6 +929,7 @@ class TestInstallFromGitHubRelease:
                     "plugin",
                     "install",
                     "https://github.com/owner/repo/releases/download/v1.5.0/plugin.whl",
+                    "--force",
                 ],
                 catch_exceptions=False,
             )
@@ -779,6 +976,7 @@ class TestInstallFromGitHubArtifact:
                     "plugin",
                     "install",
                     "https://github.com/owner/repo/actions/runs/123/artifacts/456",
+                    "--force",
                 ],
                 catch_exceptions=False,
             )
@@ -788,7 +986,7 @@ class TestInstallFromGitHubArtifact:
 
     def test_install_github_artifact_warning(self, cli_fs_runner) -> None:
         """
-        GIVEN a GitHub artifact URL
+        GIVEN a GitHub artifact URL without --force
         WHEN running 'ggshield plugin install <url>'
         THEN a warning about ephemeral artifacts is displayed
         """
@@ -863,6 +1061,7 @@ class TestInstallFromGitHubArtifact:
                     "plugin",
                     "install",
                     "https://github.com/owner/repo/actions/runs/123/artifacts/456",
+                    "--force",
                 ],
             )
 
@@ -874,6 +1073,11 @@ class TestInstallErrorHandling:
     """Tests for error handling in various install scenarios."""
 
     def test_install_local_wheel_not_found(self, cli_fs_runner, tmp_path: Path) -> None:
+        """
+        GIVEN a non-existent wheel file path
+        WHEN running 'ggshield plugin install <path>'
+        THEN it shows a file not found error
+        """
         wheel_path = tmp_path / "nonexistent.whl"
 
         with mock.patch(
@@ -888,16 +1092,16 @@ class TestInstallErrorHandling:
         assert result.exit_code == ExitCode.USAGE_ERROR
         assert "Wheel file not found" in result.output
 
-    @pytest.mark.parametrize(
-        "error",
-        [
-            pytest.param(DownloadError("Invalid wheel"), id="download_error"),
-            pytest.param(Exception("Unexpected"), id="generic_error"),
-        ],
-    )
-    def test_install_local_wheel_error(
-        self, cli_fs_runner, tmp_path: Path, error: Exception
+    def test_install_local_wheel_download_error(
+        self, cli_fs_runner, tmp_path: Path
     ) -> None:
+        """
+        GIVEN a local wheel file that fails to install
+        WHEN running 'ggshield plugin install <path>'
+        THEN it shows an error
+        """
+        from ggshield.core.plugin.downloader import DownloadError
+
         wheel_path = tmp_path / "broken.whl"
         wheel_path.touch()
 
@@ -912,89 +1116,30 @@ class TestInstallErrorHandling:
             ),
         ):
             mock_downloader = mock.MagicMock()
-            mock_downloader.install_from_wheel.side_effect = error
+            mock_downloader.install_from_wheel.side_effect = DownloadError(
+                "Invalid wheel"
+            )
             mock_downloader_class.return_value = mock_downloader
 
             result = cli_fs_runner.invoke(
                 cli,
-                ["plugin", "install", str(wheel_path)],
+                ["plugin", "install", str(wheel_path), "--force"],
             )
 
         assert result.exit_code == ExitCode.UNEXPECTED_ERROR
         assert "Failed to install from wheel" in result.output
 
-    @pytest.mark.parametrize(
-        "source_type, method, cli_args, error, expected_msg",
-        [
-            pytest.param(
-                PluginSourceType.URL,
-                "download_from_url",
-                ["plugin", "install", "https://example.com/plugin.whl"],
-                DownloadError("Network error"),
-                "Failed to install from URL",
-                id="url-download_error",
-            ),
-            pytest.param(
-                PluginSourceType.URL,
-                "download_from_url",
-                ["plugin", "install", "https://example.com/plugin.whl"],
-                Exception("Unexpected"),
-                "Failed to install from URL",
-                id="url-generic_error",
-            ),
-            pytest.param(
-                PluginSourceType.GITHUB_RELEASE,
-                "download_from_github_release",
-                [
-                    "plugin",
-                    "install",
-                    "https://github.com/owner/repo/releases/download/v1/p.whl",
-                ],
-                DownloadError("Not found"),
-                "Failed to install from GitHub release",
-                id="github_release-download_error",
-            ),
-            pytest.param(
-                PluginSourceType.GITHUB_RELEASE,
-                "download_from_github_release",
-                [
-                    "plugin",
-                    "install",
-                    "https://github.com/owner/repo/releases/download/v1/p.whl",
-                ],
-                Exception("Unexpected"),
-                "Failed to install from GitHub release",
-                id="github_release-generic_error",
-            ),
-            pytest.param(
-                PluginSourceType.GITHUB_ARTIFACT,
-                "download_from_github_artifact",
-                [
-                    "plugin",
-                    "install",
-                    "https://github.com/owner/repo/actions/runs/123/artifacts/456",
-                ],
-                DownloadError("Failed to extract"),
-                "Failed to install from GitHub artifact",
-                id="github_artifact-download_error",
-            ),
-            pytest.param(
-                PluginSourceType.GITHUB_ARTIFACT,
-                "download_from_github_artifact",
-                [
-                    "plugin",
-                    "install",
-                    "https://github.com/owner/repo/actions/runs/123/artifacts/456",
-                ],
-                Exception("Unexpected"),
-                "Failed to install from GitHub artifact",
-                id="github_artifact-generic_error",
-            ),
-        ],
-    )
-    def test_install_error(
-        self, cli_fs_runner, source_type, method, cli_args, error, expected_msg
+    def test_install_local_wheel_generic_error(
+        self, cli_fs_runner, tmp_path: Path
     ) -> None:
+        """
+        GIVEN a local wheel file with unexpected error
+        WHEN running 'ggshield plugin install <path>'
+        THEN it shows an error
+        """
+        wheel_path = tmp_path / "problem.whl"
+        wheel_path.touch()
+
         with (
             mock.patch(
                 "ggshield.cmd.plugin.install.PluginDownloader"
@@ -1002,50 +1147,68 @@ class TestInstallErrorHandling:
             mock.patch("ggshield.cmd.plugin.install.EnterpriseConfig"),
             mock.patch(
                 "ggshield.cmd.plugin.install.detect_source_type",
-                return_value=source_type,
+                return_value=PluginSourceType.LOCAL_FILE,
             ),
         ):
             mock_downloader = mock.MagicMock()
-            getattr(mock_downloader, method).side_effect = error
+            mock_downloader.install_from_wheel.side_effect = Exception("Unexpected")
             mock_downloader_class.return_value = mock_downloader
 
-            result = cli_fs_runner.invoke(cli, cli_args)
+            result = cli_fs_runner.invoke(
+                cli,
+                ["plugin", "install", str(wheel_path), "--force"],
+            )
 
         assert result.exit_code == ExitCode.UNEXPECTED_ERROR
-        assert expected_msg in result.output
+        assert "Failed to install from wheel" in result.output
 
-    @pytest.mark.parametrize(
-        "source_type, method, cli_args",
-        [
-            pytest.param(
-                PluginSourceType.URL,
-                "download_from_url",
+    def test_install_url_checksum_mismatch(self, cli_fs_runner) -> None:
+        """
+        GIVEN a URL with wrong checksum
+        WHEN running 'ggshield plugin install <url> --sha256 <hash>'
+        THEN it shows a checksum error
+        """
+        from ggshield.core.plugin.downloader import ChecksumMismatchError
+
+        with (
+            mock.patch(
+                "ggshield.cmd.plugin.install.PluginDownloader"
+            ) as mock_downloader_class,
+            mock.patch("ggshield.cmd.plugin.install.EnterpriseConfig"),
+            mock.patch(
+                "ggshield.cmd.plugin.install.detect_source_type",
+                return_value=PluginSourceType.URL,
+            ),
+        ):
+            mock_downloader = mock.MagicMock()
+            mock_downloader.download_from_url.side_effect = ChecksumMismatchError(
+                "expected123", "actual456"
+            )
+            mock_downloader_class.return_value = mock_downloader
+
+            result = cli_fs_runner.invoke(
+                cli,
                 [
                     "plugin",
                     "install",
                     "https://example.com/plugin.whl",
                     "--sha256",
                     "wrong",
+                    "--force",
                 ],
-                id="url",
-            ),
-            pytest.param(
-                PluginSourceType.GITHUB_RELEASE,
-                "download_from_github_release",
-                [
-                    "plugin",
-                    "install",
-                    "https://github.com/owner/repo/releases/download/v1/p.whl",
-                    "--sha256",
-                    "wrong",
-                ],
-                id="github_release",
-            ),
-        ],
-    )
-    def test_install_checksum_mismatch(
-        self, cli_fs_runner, source_type, method, cli_args
-    ) -> None:
+            )
+
+        assert result.exit_code == ExitCode.UNEXPECTED_ERROR
+        assert "Checksum verification failed" in result.output
+
+    def test_install_url_download_error(self, cli_fs_runner) -> None:
+        """
+        GIVEN a URL that fails to download
+        WHEN running 'ggshield plugin install <url>'
+        THEN it shows a download error
+        """
+        from ggshield.core.plugin.downloader import DownloadError
+
         with (
             mock.patch(
                 "ggshield.cmd.plugin.install.PluginDownloader"
@@ -1053,265 +1216,230 @@ class TestInstallErrorHandling:
             mock.patch("ggshield.cmd.plugin.install.EnterpriseConfig"),
             mock.patch(
                 "ggshield.cmd.plugin.install.detect_source_type",
-                return_value=source_type,
+                return_value=PluginSourceType.URL,
             ),
         ):
             mock_downloader = mock.MagicMock()
-            getattr(mock_downloader, method).side_effect = ChecksumMismatchError(
-                "expected123", "actual456"
+            mock_downloader.download_from_url.side_effect = DownloadError(
+                "Network error"
             )
             mock_downloader_class.return_value = mock_downloader
 
-            result = cli_fs_runner.invoke(cli, cli_args)
+            result = cli_fs_runner.invoke(
+                cli,
+                ["plugin", "install", "https://example.com/plugin.whl", "--force"],
+            )
+
+        assert result.exit_code == ExitCode.UNEXPECTED_ERROR
+        assert "Failed to install from URL" in result.output
+
+    def test_install_url_generic_error(self, cli_fs_runner) -> None:
+        """
+        GIVEN a URL with unexpected error
+        WHEN running 'ggshield plugin install <url>'
+        THEN it shows an error
+        """
+        with (
+            mock.patch(
+                "ggshield.cmd.plugin.install.PluginDownloader"
+            ) as mock_downloader_class,
+            mock.patch("ggshield.cmd.plugin.install.EnterpriseConfig"),
+            mock.patch(
+                "ggshield.cmd.plugin.install.detect_source_type",
+                return_value=PluginSourceType.URL,
+            ),
+        ):
+            mock_downloader = mock.MagicMock()
+            mock_downloader.download_from_url.side_effect = Exception("Unexpected")
+            mock_downloader_class.return_value = mock_downloader
+
+            result = cli_fs_runner.invoke(
+                cli,
+                ["plugin", "install", "https://example.com/plugin.whl", "--force"],
+            )
+
+        assert result.exit_code == ExitCode.UNEXPECTED_ERROR
+        assert "Failed to install from URL" in result.output
+
+    def test_install_github_release_checksum_mismatch(self, cli_fs_runner) -> None:
+        """
+        GIVEN a GitHub release URL with wrong checksum
+        WHEN running 'ggshield plugin install <url> --sha256 <hash>'
+        THEN it shows a checksum error
+        """
+        from ggshield.core.plugin.downloader import ChecksumMismatchError
+
+        with (
+            mock.patch(
+                "ggshield.cmd.plugin.install.PluginDownloader"
+            ) as mock_downloader_class,
+            mock.patch("ggshield.cmd.plugin.install.EnterpriseConfig"),
+            mock.patch(
+                "ggshield.cmd.plugin.install.detect_source_type",
+                return_value=PluginSourceType.GITHUB_RELEASE,
+            ),
+        ):
+            mock_downloader = mock.MagicMock()
+            mock_downloader.download_from_github_release.side_effect = (
+                ChecksumMismatchError("expected", "actual")
+            )
+            mock_downloader_class.return_value = mock_downloader
+
+            result = cli_fs_runner.invoke(
+                cli,
+                [
+                    "plugin",
+                    "install",
+                    "https://github.com/owner/repo/releases/download/v1/p.whl",
+                    "--sha256",
+                    "wrong",
+                    "--force",
+                ],
+            )
 
         assert result.exit_code == ExitCode.UNEXPECTED_ERROR
         assert "Checksum verification failed" in result.output
 
-
-class TestSignatureVerificationHandling:
-    """Tests for signature verification error handling in install commands."""
-
-    def test_gitguardian_install_signature_error(self, cli_fs_runner) -> None:
+    def test_install_github_release_download_error(self, cli_fs_runner) -> None:
         """
-        GIVEN a plugin with invalid signature
-        WHEN installing from GitGuardian API
-        THEN signature error is shown with --allow-unsigned hint
+        GIVEN a GitHub release URL that fails to download
+        WHEN running 'ggshield plugin install <url>'
+        THEN it shows a download error
         """
-        mock_catalog = PluginCatalog(
-            plan="Enterprise",
-            plugins=[
-                PluginInfo(
-                    name="tokenscanner",
-                    display_name="Token Scanner",
-                    description="Local secret scanning",
-                    available=True,
-                    latest_version="1.0.0",
-                    reason=None,
-                ),
-            ],
-            features={},
-        )
-
-        mock_download_info = PluginDownloadInfo(
-            download_url="https://example.com/plugin.whl",
-            filename="tokenscanner-1.0.0.whl",
-            sha256="abc123",
-            version="1.0.0",
-            expires_at="2099-12-31T23:59:59Z",
-        )
-
-        with (
-            mock.patch(
-                "ggshield.cmd.plugin.install.create_client_from_config"
-            ) as mock_create_client,
-            mock.patch(
-                "ggshield.cmd.plugin.install.PluginAPIClient"
-            ) as mock_plugin_api_client_class,
-            mock.patch(
-                "ggshield.cmd.plugin.install.PluginDownloader"
-            ) as mock_downloader_class,
-            mock.patch(
-                "ggshield.cmd.plugin.install.EnterpriseConfig"
-            ) as mock_config_class,
-        ):
-            mock_client = mock.MagicMock()
-            mock_create_client.return_value = mock_client
-
-            mock_plugin_api_client = mock.MagicMock()
-            mock_plugin_api_client.get_available_plugins.return_value = mock_catalog
-            mock_plugin_api_client.get_download_info.return_value = mock_download_info
-            mock_plugin_api_client_class.return_value = mock_plugin_api_client
-
-            mock_downloader = mock.MagicMock()
-            mock_downloader.download_and_install.side_effect = (
-                SignatureVerificationError(
-                    SignatureStatus.INVALID, "no trusted identity matched"
-                )
-            )
-            mock_downloader_class.return_value = mock_downloader
-
-            mock_config_class.load.return_value = mock.MagicMock()
-
-            result = cli_fs_runner.invoke(cli, ["plugin", "install", "tokenscanner"])
-
-        assert result.exit_code == ExitCode.UNEXPECTED_ERROR
-        assert "Signature verification failed" in result.output
-        assert "--allow-unsigned" in result.output
-
-    def test_local_wheel_signature_error(self, cli_fs_runner, tmp_path: Path) -> None:
-        """
-        GIVEN a local wheel with invalid signature
-        WHEN installing from local wheel
-        THEN signature error is shown with --allow-unsigned hint
-        """
-        wheel_path = tmp_path / "plugin.whl"
-        wheel_path.touch()
+        from ggshield.core.plugin.downloader import DownloadError
 
         with (
             mock.patch(
                 "ggshield.cmd.plugin.install.PluginDownloader"
             ) as mock_downloader_class,
-            mock.patch(
-                "ggshield.cmd.plugin.install.EnterpriseConfig"
-            ) as mock_config_class,
+            mock.patch("ggshield.cmd.plugin.install.EnterpriseConfig"),
             mock.patch(
                 "ggshield.cmd.plugin.install.detect_source_type",
-                return_value=PluginSourceType.LOCAL_FILE,
+                return_value=PluginSourceType.GITHUB_RELEASE,
             ),
         ):
             mock_downloader = mock.MagicMock()
-            mock_downloader.install_from_wheel.side_effect = SignatureVerificationError(
-                SignatureStatus.MISSING, "No bundle found"
+            mock_downloader.download_from_github_release.side_effect = DownloadError(
+                "Not found"
             )
             mock_downloader_class.return_value = mock_downloader
-
-            mock_config_class.load.return_value = mock.MagicMock()
-
-            result = cli_fs_runner.invoke(cli, ["plugin", "install", str(wheel_path)])
-
-        assert result.exit_code == ExitCode.UNEXPECTED_ERROR
-        assert "Signature verification failed" in result.output
-        assert "--allow-unsigned" in result.output
-
-    @pytest.mark.parametrize(
-        "source_type, method, cli_args",
-        [
-            pytest.param(
-                PluginSourceType.URL,
-                "download_from_url",
-                ["plugin", "install", "https://example.com/plugin.whl"],
-                id="url",
-            ),
-            pytest.param(
-                PluginSourceType.GITHUB_RELEASE,
-                "download_from_github_release",
-                [
-                    "plugin",
-                    "install",
-                    "https://github.com/o/r/releases/download/v1/p.whl",
-                ],
-                id="github_release",
-            ),
-            pytest.param(
-                PluginSourceType.GITHUB_ARTIFACT,
-                "download_from_github_artifact",
-                [
-                    "plugin",
-                    "install",
-                    "https://github.com/o/r/actions/runs/1/artifacts/2",
-                ],
-                id="github_artifact",
-            ),
-        ],
-    )
-    def test_signature_error_all_sources(
-        self, cli_fs_runner, source_type, method, cli_args
-    ) -> None:
-        """Test that SignatureVerificationError is handled for all source types."""
-        with (
-            mock.patch(
-                "ggshield.cmd.plugin.install.PluginDownloader"
-            ) as mock_downloader_class,
-            mock.patch(
-                "ggshield.cmd.plugin.install.EnterpriseConfig"
-            ) as mock_config_class,
-            mock.patch(
-                "ggshield.cmd.plugin.install.detect_source_type",
-                return_value=source_type,
-            ),
-        ):
-            mock_downloader = mock.MagicMock()
-            getattr(mock_downloader, method).side_effect = SignatureVerificationError(
-                SignatureStatus.INVALID, "bad signature"
-            )
-            mock_downloader_class.return_value = mock_downloader
-
-            mock_config_class.load.return_value = mock.MagicMock()
-
-            result = cli_fs_runner.invoke(cli, cli_args)
-
-        assert result.exit_code == ExitCode.UNEXPECTED_ERROR
-        assert "Signature verification failed" in result.output
-        assert "--allow-unsigned" in result.output
-
-    def test_default_signature_mode_is_strict(
-        self, cli_fs_runner, tmp_path: Path
-    ) -> None:
-        """
-        GIVEN no --allow-unsigned flag
-        WHEN installing a plugin
-        THEN signature mode is STRICT
-        """
-        wheel_path = tmp_path / "plugin.whl"
-        wheel_path.touch()
-
-        with (
-            mock.patch(
-                "ggshield.cmd.plugin.install.PluginDownloader"
-            ) as mock_downloader_class,
-            mock.patch(
-                "ggshield.cmd.plugin.install.EnterpriseConfig"
-            ) as mock_config_class,
-            mock.patch(
-                "ggshield.cmd.plugin.install.detect_source_type",
-                return_value=PluginSourceType.LOCAL_FILE,
-            ),
-        ):
-            mock_downloader = mock.MagicMock()
-            mock_downloader.install_from_wheel.return_value = (
-                "plugin",
-                "1.0.0",
-                wheel_path,
-            )
-            mock_downloader_class.return_value = mock_downloader
-            mock_config_class.load.return_value = mock.MagicMock()
 
             result = cli_fs_runner.invoke(
                 cli,
-                ["plugin", "install", str(wheel_path)],
-                catch_exceptions=False,
+                [
+                    "plugin",
+                    "install",
+                    "https://github.com/owner/repo/releases/download/v1/p.whl",
+                    "--force",
+                ],
             )
 
-        assert result.exit_code == ExitCode.SUCCESS
-        call_kwargs = mock_downloader.install_from_wheel.call_args[1]
-        assert call_kwargs["signature_mode"] == SignatureVerificationMode.STRICT
+        assert result.exit_code == ExitCode.UNEXPECTED_ERROR
+        assert "Failed to install from GitHub release" in result.output
 
-    def test_allow_unsigned_flag(self, cli_fs_runner, tmp_path: Path) -> None:
+    def test_install_github_release_generic_error(self, cli_fs_runner) -> None:
         """
-        GIVEN --allow-unsigned flag
-        WHEN installing a plugin
-        THEN signature mode is set to WARN (not STRICT)
+        GIVEN a GitHub release URL with unexpected error
+        WHEN running 'ggshield plugin install <url>'
+        THEN it shows an error
         """
-        wheel_path = tmp_path / "plugin.whl"
-        wheel_path.touch()
+        with (
+            mock.patch(
+                "ggshield.cmd.plugin.install.PluginDownloader"
+            ) as mock_downloader_class,
+            mock.patch("ggshield.cmd.plugin.install.EnterpriseConfig"),
+            mock.patch(
+                "ggshield.cmd.plugin.install.detect_source_type",
+                return_value=PluginSourceType.GITHUB_RELEASE,
+            ),
+        ):
+            mock_downloader = mock.MagicMock()
+            mock_downloader.download_from_github_release.side_effect = Exception(
+                "Unexpected"
+            )
+            mock_downloader_class.return_value = mock_downloader
+
+            result = cli_fs_runner.invoke(
+                cli,
+                [
+                    "plugin",
+                    "install",
+                    "https://github.com/owner/repo/releases/download/v1/p.whl",
+                    "--force",
+                ],
+            )
+
+        assert result.exit_code == ExitCode.UNEXPECTED_ERROR
+        assert "Failed to install from GitHub release" in result.output
+
+    def test_install_github_artifact_download_error(self, cli_fs_runner) -> None:
+        """
+        GIVEN a GitHub artifact URL that fails to download
+        WHEN running 'ggshield plugin install <url>'
+        THEN it shows a download error
+        """
+        from ggshield.core.plugin.downloader import DownloadError
 
         with (
             mock.patch(
                 "ggshield.cmd.plugin.install.PluginDownloader"
             ) as mock_downloader_class,
-            mock.patch(
-                "ggshield.cmd.plugin.install.EnterpriseConfig"
-            ) as mock_config_class,
+            mock.patch("ggshield.cmd.plugin.install.EnterpriseConfig"),
             mock.patch(
                 "ggshield.cmd.plugin.install.detect_source_type",
-                return_value=PluginSourceType.LOCAL_FILE,
+                return_value=PluginSourceType.GITHUB_ARTIFACT,
             ),
         ):
             mock_downloader = mock.MagicMock()
-            mock_downloader.install_from_wheel.return_value = (
-                "plugin",
-                "1.0.0",
-                wheel_path,
+            mock_downloader.download_from_github_artifact.side_effect = DownloadError(
+                "Failed to extract"
             )
             mock_downloader_class.return_value = mock_downloader
-            mock_config_class.load.return_value = mock.MagicMock()
 
             result = cli_fs_runner.invoke(
                 cli,
-                ["plugin", "install", str(wheel_path), "--allow-unsigned"],
-                catch_exceptions=False,
+                [
+                    "plugin",
+                    "install",
+                    "https://github.com/owner/repo/actions/runs/123/artifacts/456",
+                    "--force",
+                ],
             )
 
-        assert result.exit_code == ExitCode.SUCCESS
-        call_kwargs = mock_downloader.install_from_wheel.call_args[1]
-        assert call_kwargs["signature_mode"] == SignatureVerificationMode.WARN
+        assert result.exit_code == ExitCode.UNEXPECTED_ERROR
+        assert "Failed to install from GitHub artifact" in result.output
+
+    def test_install_github_artifact_generic_error(self, cli_fs_runner) -> None:
+        """
+        GIVEN a GitHub artifact URL with unexpected error
+        WHEN running 'ggshield plugin install <url>'
+        THEN it shows an error
+        """
+        with (
+            mock.patch(
+                "ggshield.cmd.plugin.install.PluginDownloader"
+            ) as mock_downloader_class,
+            mock.patch("ggshield.cmd.plugin.install.EnterpriseConfig"),
+            mock.patch(
+                "ggshield.cmd.plugin.install.detect_source_type",
+                return_value=PluginSourceType.GITHUB_ARTIFACT,
+            ),
+        ):
+            mock_downloader = mock.MagicMock()
+            mock_downloader.download_from_github_artifact.side_effect = Exception(
+                "Unexpected"
+            )
+            mock_downloader_class.return_value = mock_downloader
+
+            result = cli_fs_runner.invoke(
+                cli,
+                [
+                    "plugin",
+                    "install",
+                    "https://github.com/owner/repo/actions/runs/123/artifacts/456",
+                    "--force",
+                ],
+            )
+
+        assert result.exit_code == ExitCode.UNEXPECTED_ERROR
+        assert "Failed to install from GitHub artifact" in result.output
