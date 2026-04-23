@@ -7,7 +7,13 @@ import pytest
 import requests.exceptions
 from pyfakefs.fake_filesystem import FakeFilesystem
 from pygitguardian import GGClient
-from pygitguardian.models import APITokensResponse, Detail, TokenScope
+from pygitguardian.models import (
+    APITokensResponse,
+    Detail,
+    RemediationMessages,
+    SecretScanPreferences,
+    TokenScope,
+)
 
 from ggshield.core.client import (
     check_client_api_key,
@@ -24,12 +30,26 @@ from ggshield.core.errors import (
 )
 
 
+def _make_client_mock() -> Mock:
+    client_mock = Mock(spec=GGClient)
+    client_mock.base_uri = "http://localhost"
+    client_mock.api_key = "test-api-key"
+    client_mock.secrets_engine_version = "2.0.0"
+    client_mock.maximum_payload_size = 1_000_000
+    client_mock.secret_scan_preferences = SecretScanPreferences()
+    client_mock.remediation_messages = RemediationMessages()
+    return client_mock
+
+
 @pytest.mark.parametrize(
     ("response", "error_class"),
     (
         (Detail("Guru Meditation", 500), ServiceUnavailableError),
         (Detail("Nobody here", 404), UnexpectedError),
         (Detail("Unauthorized", 401), APIKeyCheckError),
+        # Catch-all branch for status codes we have no specific handling for
+        # (e.g. an unexpected 418 from a misconfigured reverse proxy).
+        (Detail("I'm a teapot", 418), UnexpectedError),
     ),
 )
 def test_check_client_api_key_error(response: Detail, error_class: Type[Exception]):
@@ -38,8 +58,7 @@ def test_check_client_api_key_error(response: Detail, error_class: Type[Exceptio
     WHEN check_client_api_key() is called
     THEN it raises the appropriate exception
     """
-    client_mock = Mock(spec=GGClient)
-    client_mock.base_uri = "http://localhost"
+    client_mock = _make_client_mock()
     client_mock.read_metadata.return_value = response
     with pytest.raises(error_class):
         check_client_api_key(client_mock, set())
@@ -51,8 +70,7 @@ def test_check_client_api_key_network_error():
     WHEN check_client_api_key() is called
     THEN it raises a ServiceUnavailableError
     """
-    client_mock = Mock(spec=GGClient)
-    client_mock.base_uri = "http://localhost"
+    client_mock = _make_client_mock()
     client_mock.read_metadata = Mock(
         side_effect=requests.exceptions.ConnectionError("Connection refused")
     )
@@ -66,8 +84,7 @@ def test_check_client_api_key_with_source_uuid_success():
     WHEN check_client_api_key() is called with scope scan:create-incidents
     THEN it succeeds without raising any exception
     """
-    client_mock = Mock(spec=GGClient)
-    client_mock.base_uri = "http://localhost"
+    client_mock = _make_client_mock()
     client_mock.read_metadata.return_value = None  # Success
     client_mock.api_tokens.return_value = APITokensResponse.from_dict(
         {
@@ -91,8 +108,7 @@ def test_check_client_api_key_with_source_uuid_missing_scope():
     WHEN check_client_api_key() is called with scope scan:create-incidents
     THEN it raises MissingScopesError
     """
-    client_mock = Mock(spec=GGClient)
-    client_mock.base_uri = "http://localhost"
+    client_mock = _make_client_mock()
     client_mock.read_metadata.return_value = None  # Success
     client_mock.api_tokens.return_value = APITokensResponse.from_dict(
         {
@@ -121,8 +137,7 @@ def test_check_client_api_key_with_source_uuid_api_tokens_error():
     WHEN check_client_api_key() is called with scope scan:create-incidents
     THEN it raises UnexpectedError
     """
-    client_mock = Mock(spec=GGClient)
-    client_mock.base_uri = "http://localhost"
+    client_mock = _make_client_mock()
     client_mock.read_metadata.return_value = None  # Success
     client_mock.api_tokens.return_value = Detail("API tokens error", 500)
 
@@ -136,8 +151,7 @@ def test_check_client_api_key_with_source_uuid_unexpected_response():
     WHEN check_client_api_key() is called with scope scan:create-incidents
     THEN it raises UnexpectedError
     """
-    client_mock = Mock(spec=GGClient)
-    client_mock.base_uri = "http://localhost"
+    client_mock = _make_client_mock()
     client_mock.read_metadata.return_value = None  # Success
     client_mock.api_tokens.return_value = "unexpected_response_type"
 
@@ -151,8 +165,7 @@ def test_check_client_api_key_without_source_uuid_no_token_check():
     WHEN check_client_api_key() is called without required scopes
     THEN it doesn't call api_tokens
     """
-    client_mock = Mock(spec=GGClient)
-    client_mock.base_uri = "http://localhost"
+    client_mock = _make_client_mock()
     client_mock.read_metadata.return_value = None  # Success
 
     check_client_api_key(client_mock, set())
@@ -167,8 +180,7 @@ def test_check_client_api_key_unknown_scope():
     WHEN check_client_api_key() is called with required scopes
     THEN it ignores unknown scopes and validates only the required ones
     """
-    client_mock = Mock(spec=GGClient)
-    client_mock.base_uri = "http://localhost"
+    client_mock = _make_client_mock()
     client_mock.read_metadata.return_value = None  # Success
     client_mock.api_tokens.return_value = APITokensResponse.from_dict(
         {

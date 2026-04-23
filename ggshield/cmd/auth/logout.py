@@ -7,6 +7,7 @@ from requests.exceptions import ConnectionError
 import ggshield.verticals.hmsl.utils as hmsl_utils
 from ggshield.cmd.utils.common_options import add_common_options
 from ggshield.cmd.utils.context_obj import ContextObj
+from ggshield.core import auth_check_cache
 from ggshield.core.client import create_client
 from ggshield.core.config import Config
 from ggshield.core.config.token_store import get_token_store
@@ -74,6 +75,7 @@ def logout(config: Config, instance_url: str, revoke: bool) -> None:
         revoke_token(config, instance_url)
         hmsl_utils.remove_token_from_disk()
     delete_account_config(config, instance_url)
+    auth_check_cache.invalidate()
 
     click.echo(
         f"Successfully logged out for instance {instance_url}\n\n"
