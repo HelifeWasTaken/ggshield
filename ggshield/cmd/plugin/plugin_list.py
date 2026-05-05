@@ -56,9 +56,7 @@ def list_cmd(ctx: click.Context, **kwargs: Any) -> None:
             status_parts.append("disabled")
 
         source = (
-            downloader.get_plugin_source(plugin.name)
-            if plugin.wheel_path
-            else None
+            downloader.get_plugin_source(plugin.name) if plugin.wheel_path else None
         )
         if source is not None:
             status_parts.append(source.type.value.replace("_", " "))

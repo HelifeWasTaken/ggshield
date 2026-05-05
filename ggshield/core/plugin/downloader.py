@@ -68,9 +68,7 @@ def _assert_all_https(response: "requests.Response") -> None:
     """
     for hop in list(response.history) + [response]:
         if not hop.url.startswith("https://"):
-            raise InsecureSourceError(
-                f"Refusing insecure redirect through {hop.url!r}"
-            )
+            raise InsecureSourceError(f"Refusing insecure redirect through {hop.url!r}")
 
 
 def _stream_to_file(
@@ -397,9 +395,7 @@ class PluginDownloader:
 
             try:
                 logger.info("Downloading from %s...", url)
-                response = requests.get(
-                    url, stream=True, timeout=HTTP_TIMEOUT_SECONDS
-                )
+                response = requests.get(url, stream=True, timeout=HTTP_TIMEOUT_SECONDS)
                 _assert_all_https(response)
                 response.raise_for_status()
 
@@ -578,9 +574,7 @@ class PluginDownloader:
                 _assert_all_https(response)
                 response.raise_for_status()
 
-                _stream_to_file(
-                    response, artifact_zip_path, MAX_WHEEL_SIZE_BYTES
-                )
+                _stream_to_file(response, artifact_zip_path, MAX_WHEEL_SIZE_BYTES)
 
             except requests.RequestException as e:
                 raise GitHubArtifactError(f"Failed to download artifact: {e}") from e

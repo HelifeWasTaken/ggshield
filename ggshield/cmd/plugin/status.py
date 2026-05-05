@@ -12,7 +12,11 @@ from ggshield.core import ui
 from ggshield.core.client import create_client_from_config
 from ggshield.core.config.enterprise_config import EnterpriseConfig
 from ggshield.core.errors import ExitCode
-from ggshield.core.plugin.client import PluginAPIClient, PluginAPIError, PluginsNotEnabledError
+from ggshield.core.plugin.client import (
+    PluginAPIClient,
+    PluginAPIError,
+    PluginsNotEnabledError,
+)
 from ggshield.core.plugin.downloader import PluginDownloader
 
 
@@ -78,8 +82,6 @@ def status_cmd(ctx: click.Context, **kwargs: Any) -> None:
                     ui.display_info(f"    Signature: {sig_label}")
             ui.display_info(f"    {plugin.description}")
         else:
-            ui.display_info(
-                f"  {plugin.display_name} ({plugin.name}) - not available"
-            )
+            ui.display_info(f"  {plugin.display_name} ({plugin.name}) - not available")
             if plugin.reason:
                 ui.display_info(f"    Reason: {plugin.reason}")

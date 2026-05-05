@@ -29,9 +29,7 @@ def _assert_all_https(response: "requests.Response") -> None:
     """Reject a response whose redirect chain went through non-HTTPS."""
     for hop in list(response.history) + [response]:
         if not hop.url.startswith("https://"):
-            raise PluginAPIError(
-                f"Refusing insecure redirect through {hop.url!r}"
-            )
+            raise PluginAPIError(f"Refusing insecure redirect through {hop.url!r}")
 
 
 def _sanitize_wheel_filename(raw: str) -> str:
@@ -146,9 +144,9 @@ class PluginCatalog:
 class PluginDownloadInfo:
     """Metadata about a plugin wheel received from the platform download endpoint."""
 
-    filename: str    # from Content-Disposition header
-    sha256: str      # from X-Plugin-SHA256 header
-    version: str     # from X-Plugin-Version header
+    filename: str  # from Content-Disposition header
+    sha256: str  # from X-Plugin-SHA256 header
+    version: str  # from X-Plugin-Version header
     size_bytes: int  # from Content-Length header
     # Absolute URL of the sigstore bundle, from the X-Plugin-Signature-URL
     # response header. None when the platform has no bundle for this

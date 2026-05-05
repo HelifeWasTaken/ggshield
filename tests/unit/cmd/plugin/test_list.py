@@ -32,8 +32,8 @@ def _run_list(cli_fs_runner, plugins, source_for_name=None, signature_label=None
         mock_loader_class.return_value = mock_loader
 
         mock_downloader = mock.MagicMock()
-        mock_downloader.get_plugin_source.side_effect = lambda name: source_for_name.get(
-            name
+        mock_downloader.get_plugin_source.side_effect = (
+            lambda name: source_for_name.get(name)
         )
         mock_downloader.get_installed_signature_label.return_value = signature_label
         mock_downloader_class.return_value = mock_downloader

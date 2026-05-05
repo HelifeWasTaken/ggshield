@@ -304,9 +304,7 @@ def update_cmd(
                     version=latest_version,
                 ) as (info, chunks):
                     bundle_bytes = (
-                        plugin_api_client.download_signature_bundle(
-                            info.signature_url
-                        )
+                        plugin_api_client.download_signature_bundle(info.signature_url)
                         if info.signature_url
                         else None
                     )

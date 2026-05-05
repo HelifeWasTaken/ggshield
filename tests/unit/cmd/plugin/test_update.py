@@ -1117,9 +1117,7 @@ class TestPluginUpdate:
             mock.patch(
                 "ggshield.cmd.plugin.update.EnterpriseConfig"
             ) as mock_config_class,
-            mock.patch(
-                "ggshield.cmd.plugin.update.PluginLoader"
-            ) as mock_loader_class,
+            mock.patch("ggshield.cmd.plugin.update.PluginLoader") as mock_loader_class,
             mock.patch(
                 "ggshield.cmd.plugin.update.PluginDownloader"
             ) as mock_downloader_class,

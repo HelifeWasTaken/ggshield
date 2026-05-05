@@ -177,9 +177,7 @@ def _install_from_gitguardian(
     available_plugins = {p.name: p for p in catalog.plugins if p.available}
 
     if plugin_name not in available_plugins:
-        unavailable = next(
-            (p for p in catalog.plugins if p.name == plugin_name), None
-        )
+        unavailable = next((p for p in catalog.plugins if p.name == plugin_name), None)
         if unavailable:
             ui.display_error(
                 f"Plugin '{plugin_name}' is not available for your account"

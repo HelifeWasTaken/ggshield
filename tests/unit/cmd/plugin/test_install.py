@@ -100,7 +100,9 @@ class TestPluginInstall:
         mock_plugin_api_client.report_installation.assert_called_once_with(
             "tokenscanner", "1.0.0", mock.ANY, mock.ANY
         )
-        mock_config.enable_plugin.assert_called_once_with("tokenscanner", version="1.0.0")
+        mock_config.enable_plugin.assert_called_once_with(
+            "tokenscanner", version="1.0.0"
+        )
         mock_config.save.assert_called_once()
 
     def test_install_plugins_not_enabled(self, cli_fs_runner):
@@ -126,17 +128,13 @@ class TestPluginInstall:
             )
             mock_plugin_api_client_class.return_value = mock_plugin_api_client
 
-            result = cli_fs_runner.invoke(
-                cli, ["plugin", "install", "tokenscanner"]
-            )
+            result = cli_fs_runner.invoke(cli, ["plugin", "install", "tokenscanner"])
 
         assert result.exit_code == ExitCode.UNEXPECTED_ERROR
         assert "not available" in result.output.lower()
         assert "administrator" in result.output.lower()
 
-    def test_install_calls_report_installation_after_success(
-        self, cli_fs_runner
-    ):
+    def test_install_calls_report_installation_after_success(self, cli_fs_runner):
         """
         GIVEN a successful plugin install
         WHEN running 'ggshield plugin install tokenscanner'
