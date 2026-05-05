@@ -35,6 +35,25 @@ from ggshield.core.plugin.wheel_utils import WheelError, extract_wheel_metadata
 logger = logging.getLogger(__name__)
 
 
+def _wheel_distribution_name(filename: str) -> str:
+    """Return the PEP 503-normalised distribution name from a wheel filename.
+
+    PEP 427 wheel filenames are
+    ``{distribution}-{version}(-{build})?-{python}-{abi}-{platform}.whl``.
+    The distribution segment uses ``_`` in place of ``-`` from the
+    canonical name, so the inverse normalisation
+    (``lower()`` + ``_ -> -``) recovers the PEP 503 form. We only need
+    the distribution segment, so a simple split on ``-`` is enough.
+    """
+    if not filename.endswith(".whl"):
+        raise DownloadError(f"Not a wheel filename: {filename!r}")
+    stem = filename[: -len(".whl")]
+    parts = stem.split("-", 1)
+    if len(parts) < 2 or not parts[0]:
+        raise DownloadError(f"Invalid wheel filename: {filename!r}")
+    return parts[0].lower().replace("_", "-")
+
+
 HTTP_TIMEOUT_SECONDS = 30
 MAX_WHEEL_SIZE_BYTES = 256 * 1024 * 1024
 MAX_BUNDLE_SIZE_BYTES = 1 * 1024 * 1024
@@ -163,10 +182,20 @@ class PluginDownloader:
     ) -> Path:
         """Install a plugin wheel from a byte stream.
 
+        The on-disk plugin directory is named after the wheel's
+        distribution name (PEP 427 → PEP 503), same as
+        :meth:`install_from_wheel`. ``plugin_name`` is the catalog
+        reference used for the API call and stored in the manifest;
+        when it differs from the wheel's distribution name (e.g. the
+        catalog references ``machine_scan`` while the wheel ships
+        as ``satori-python``), a subsequent local-wheel install of
+        the same package overwrites this install in place rather than
+        creating a side-by-side directory.
+
         Args:
             download_info: Filename, SHA256, version from the platform response headers.
             chunks: Iterator of raw bytes (from streaming HTTP response or test fixture).
-            plugin_name: Name used for the local plugin directory.
+            plugin_name: Catalog reference used for the API call and stored in the manifest.
             source: Manifest source record. Defaults to PluginSourceType.PLATFORM.
             signature_mode: Sigstore verification mode.
             bundle_bytes: Optional sigstore bundle bytes fetched by the
@@ -176,7 +205,9 @@ class PluginDownloader:
                 succeeds when the platform exposes a signature.
 
         Returns:
-            Path to the installed wheel file.
+            Path to the installed wheel file. The parent directory's name
+            is the wheel's distribution name and matches what
+            :meth:`install_from_wheel` would use for the same wheel.
 
         Raises:
             ChecksumMismatchError: SHA256 of received bytes does not match download_info.sha256.
@@ -185,9 +216,18 @@ class PluginDownloader:
         """
         self._validate_plugin_name(plugin_name)
 
-        plugin_dir = self.plugins_dir / plugin_name
-        plugin_dir.mkdir(parents=True, exist_ok=True)
+        # The on-disk plugin directory comes from the wheel's
+        # distribution name (PEP 427 → PEP 503), not from the catalog
+        # reference, so the catalog install converges with a previous
+        # ``install_from_wheel`` of the same wheel rather than creating
+        # a side-by-side directory. ``download_info.filename`` was
+        # validated by the API client (``_sanitize_wheel_filename``) and
+        # came from the trusted catalog response.
+        install_dir_name = _wheel_distribution_name(download_info.filename)
+        self._validate_plugin_name(install_dir_name)
 
+        plugin_dir = self.plugins_dir / install_dir_name
+        plugin_dir.mkdir(parents=True, exist_ok=True)
         wheel_path = plugin_dir / download_info.filename
         temp_path = plugin_dir / f"{download_info.filename}.tmp"
 
@@ -207,7 +247,7 @@ class PluginDownloader:
             # into place, then drop the fresh one (if provided) so
             # `verify_wheel_signature` below can find it.
             self._remove_bundle_files(wheel_path)
-            temp_path.rename(wheel_path)
+            temp_path.replace(wheel_path)
             if bundle_bytes is not None:
                 bundle_path = wheel_path.parent / (wheel_path.name + ".sigstore")
                 bundle_path.write_bytes(bundle_bytes)
@@ -220,10 +260,10 @@ class PluginDownloader:
             # Sync trust record before writing the manifest so a trust failure
             # cannot leave an orphaned manifest pointing at a wheel we remove
             # during cleanup.
-            self._sync_trust_record(plugin_name, download_info.sha256, sig_info)
+            self._sync_trust_record(install_dir_name, download_info.sha256, sig_info)
             self._write_manifest(
                 plugin_dir=plugin_dir,
-                plugin_name=plugin_name,
+                plugin_name=install_dir_name,
                 version=download_info.version,
                 wheel_filename=download_info.filename,
                 sha256=download_info.sha256,
@@ -231,7 +271,7 @@ class PluginDownloader:
                 signature_info=sig_info,
             )
 
-            logger.info("Installed %s v%s", plugin_name, download_info.version)
+            logger.info("Installed %s v%s", install_dir_name, download_info.version)
             return wheel_path
 
         except SignatureVerificationError:
