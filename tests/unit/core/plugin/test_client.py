@@ -467,3 +467,171 @@ class TestExtractServerDetail:
 
         response.json.return_value = ["just", "a", "list"]
         assert _extract_server_detail(response) is None
+
+
+class TestDownloadPluginErrorPaths:
+    """Tests for ``PluginAPIClient.download_plugin``'s validation branches."""
+
+    @pytest.fixture
+    def mock_gg_client(self) -> MagicMock:
+        client = MagicMock()
+        client.base_uri = "https://api.gitguardian.com/"
+        client.api_key = "test-api-key"
+        client.session = MagicMock()
+        return client
+
+    def _make_response(self, headers: dict, status_code: int = 200) -> MagicMock:
+        response = MagicMock()
+        response.status_code = status_code
+        response.history = []
+        response.url = "https://api.gitguardian.com/v1/endpoints/plugins/p/download"
+        response.headers = headers
+        response.iter_content.return_value = iter([b"wheel-bytes"])
+        return response
+
+    def test_raises_on_missing_sha256_header(self, mock_gg_client: MagicMock) -> None:
+        """Server response without X-Plugin-SHA256 yields a PluginAPIError."""
+        mock_gg_client.session.get.return_value = self._make_response(
+            {
+                "Content-Disposition": 'attachment; filename="p-1.0.0.whl"',
+                "X-Plugin-Version": "1.0.0",
+                "Content-Length": "10",
+            }
+        )
+
+        client = PluginAPIClient(mock_gg_client)
+        from ggshield.core.plugin.platform import PlatformInfo
+
+        with pytest.raises(PluginAPIError, match="X-Plugin-SHA256"):
+            with client.download_plugin(
+                "p", platform_info=PlatformInfo("linux", "x86_64", "cp311")
+            ):
+                pass
+
+    def test_raises_on_missing_version_header(self, mock_gg_client: MagicMock) -> None:
+        """Server response without X-Plugin-Version yields a PluginAPIError."""
+        mock_gg_client.session.get.return_value = self._make_response(
+            {
+                "Content-Disposition": 'attachment; filename="p-1.0.0.whl"',
+                "X-Plugin-SHA256": "a" * 64,
+                "Content-Length": "10",
+            }
+        )
+
+        client = PluginAPIClient(mock_gg_client)
+        from ggshield.core.plugin.platform import PlatformInfo
+
+        with pytest.raises(PluginAPIError, match="X-Plugin-Version"):
+            with client.download_plugin(
+                "p", platform_info=PlatformInfo("linux", "x86_64", "cp311")
+            ):
+                pass
+
+    def test_raises_when_content_length_exceeds_cap(
+        self, mock_gg_client: MagicMock
+    ) -> None:
+        """Content-Length above MAX_WHEEL_SIZE_BYTES is rejected upfront."""
+        from ggshield.core.plugin.client import MAX_WHEEL_SIZE_BYTES
+
+        mock_gg_client.session.get.return_value = self._make_response(
+            {
+                "Content-Disposition": 'attachment; filename="p-1.0.0.whl"',
+                "X-Plugin-SHA256": "a" * 64,
+                "X-Plugin-Version": "1.0.0",
+                "Content-Length": str(MAX_WHEEL_SIZE_BYTES + 1),
+            }
+        )
+
+        client = PluginAPIClient(mock_gg_client)
+        from ggshield.core.plugin.platform import PlatformInfo
+
+        with pytest.raises(PluginAPIError, match="exceeds maximum"):
+            with client.download_plugin(
+                "p", platform_info=PlatformInfo("linux", "x86_64", "cp311")
+            ):
+                pass
+
+    def test_wraps_request_exception(self, mock_gg_client: MagicMock) -> None:
+        """A requests.RequestException becomes a PluginAPIError."""
+        mock_gg_client.session.get.side_effect = requests.RequestException("boom")
+
+        client = PluginAPIClient(mock_gg_client)
+        from ggshield.core.plugin.platform import PlatformInfo
+
+        with pytest.raises(PluginAPIError, match="Failed to download plugin"):
+            with client.download_plugin(
+                "p", platform_info=PlatformInfo("linux", "x86_64", "cp311")
+            ):
+                pass
+
+    def test_passes_version_in_query(self, mock_gg_client: MagicMock) -> None:
+        """``version=`` argument is forwarded as a query param."""
+        mock_gg_client.session.get.return_value = self._make_response(
+            {
+                "Content-Disposition": 'attachment; filename="p-0.5.0.whl"',
+                "X-Plugin-SHA256": "a" * 64,
+                "X-Plugin-Version": "0.5.0",
+                "Content-Length": "10",
+            }
+        )
+
+        client = PluginAPIClient(mock_gg_client)
+        from ggshield.core.plugin.platform import PlatformInfo
+
+        with client.download_plugin(
+            "p", platform_info=PlatformInfo("linux", "x86_64", "cp311"), version="0.5.0"
+        ):
+            pass
+
+        call = mock_gg_client.session.get.call_args
+        params = call.kwargs.get("params") or {}
+        assert params.get("version") == "0.5.0"
+
+
+class TestSecurityHelpers:
+    """Tests for module-level security helpers."""
+
+    def test_assert_all_https_rejects_http_redirect(self) -> None:
+        """A redirect chain through HTTP raises PluginAPIError."""
+        from ggshield.core.plugin.client import _assert_all_https
+
+        hop = MagicMock()
+        hop.url = "http://example.com/insecure"
+        response = MagicMock()
+        response.history = [hop]
+        response.url = "https://example.com/final"
+
+        with pytest.raises(PluginAPIError, match="insecure redirect"):
+            _assert_all_https(response)
+
+    def test_sanitize_wheel_filename_rejects_dotdot(self) -> None:
+        """A wheel filename equal to ``..`` is rejected before becoming a path."""
+        from ggshield.core.plugin.client import _sanitize_wheel_filename
+
+        with pytest.raises(PluginAPIError, match="unsafe filename"):
+            _sanitize_wheel_filename("..")
+
+    def test_sanitize_wheel_filename_rejects_embedded_null(self) -> None:
+        """A filename with NUL bytes is rejected."""
+        from ggshield.core.plugin.client import _sanitize_wheel_filename
+
+        with pytest.raises(PluginAPIError, match="unsafe filename"):
+            _sanitize_wheel_filename("ok\x00.whl")
+
+    def test_sanitize_wheel_filename_rejects_backslash(self) -> None:
+        """Backslash in filename is rejected (Windows path separator)."""
+        from ggshield.core.plugin.client import _sanitize_wheel_filename
+
+        with pytest.raises(PluginAPIError, match="unsafe filename"):
+            _sanitize_wheel_filename("evil\\path.whl")
+
+    def test_iter_with_size_cap_raises_on_overflow(self) -> None:
+        """Total bytes exceeding the cap raise PluginAPIError mid-stream."""
+        from ggshield.core.plugin.client import _iter_with_size_cap
+
+        gen = _iter_with_size_cap(iter([b"a" * 100, b"b" * 100]), max_bytes=150)
+        # First chunk fits.
+        next(gen)
+        # Second chunk pushes total past the cap.
+        with pytest.raises(PluginAPIError, match="exceeded maximum"):
+            next(gen)

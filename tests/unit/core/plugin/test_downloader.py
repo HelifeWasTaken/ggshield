@@ -1740,3 +1740,179 @@ class TestCleanupLegacyInstallDir:
         )
 
         downloader.trust_store.revoke_plugin.assert_called_once_with("machine_scan")
+
+
+class TestWheelDistributionName:
+    """Tests for _wheel_distribution_name (PEP 427 → PEP 503)."""
+
+    def test_normalises_underscores(self) -> None:
+        from ggshield.core.plugin.downloader import _wheel_distribution_name
+
+        assert (
+            _wheel_distribution_name(
+                "satori_python-0.38.1-cp37-abi3-manylinux_2_28_x86_64.whl"
+            )
+            == "satori-python"
+        )
+
+    def test_lowercases(self) -> None:
+        from ggshield.core.plugin.downloader import _wheel_distribution_name
+
+        assert _wheel_distribution_name("Foo-1.0.0-py3-none-any.whl") == "foo"
+
+    def test_rejects_non_wheel_extension(self) -> None:
+        from ggshield.core.plugin.downloader import _wheel_distribution_name
+
+        with pytest.raises(DownloadError, match="Not a wheel filename"):
+            _wheel_distribution_name("plugin-1.0.0.tar.gz")
+
+    def test_rejects_invalid_format(self) -> None:
+        """A wheel filename without version/python segments is rejected."""
+        from ggshield.core.plugin.downloader import _wheel_distribution_name
+
+        # No '-' at all → bad format.
+        with pytest.raises(DownloadError, match="Invalid wheel filename"):
+            _wheel_distribution_name("plugin.whl")
+
+
+class TestDownloadAndInstallBundle:
+    """Tests for the bundle_bytes path of download_and_install."""
+
+    def test_writes_bundle_alongside_wheel(self, tmp_path: Path) -> None:
+        """bundle_bytes is persisted as ``<wheel>.sigstore`` next to the
+        wheel in the install dir."""
+        wheel_content = b"fake wheel content"
+        sha256 = hashlib.sha256(wheel_content).hexdigest()
+        bundle_bytes = b'{"fake": "bundle"}'
+        download_info = PluginDownloadInfo(
+            filename="plug-1.0.0.whl",
+            sha256=sha256,
+            version="1.0.0",
+            size_bytes=len(wheel_content),
+        )
+
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ), patch(
+            "ggshield.core.plugin.downloader.verify_wheel_signature",
+            return_value=MOCK_SIG_INFO,
+        ):
+            downloader = PluginDownloader()
+            wheel_path = downloader.download_and_install(
+                download_info,
+                iter([wheel_content]),
+                "plug",
+                bundle_bytes=bundle_bytes,
+            )
+
+        bundle_path = wheel_path.parent / (wheel_path.name + ".sigstore")
+        assert bundle_path.exists()
+        assert bundle_path.read_bytes() == bundle_bytes
+
+    def test_signature_failure_leaves_existing_install_intact(
+        self, tmp_path: Path
+    ) -> None:
+        """When STRICT verification fails on update, the previous install
+        (wheel + manifest) is untouched."""
+        # Pre-populate the install dir as if a prior version is already
+        # installed (matches the real upgrade scenario).
+        install_dir = tmp_path / "plug"
+        install_dir.mkdir()
+        previous_wheel_bytes = b"previous good wheel"
+        previous_wheel_path = install_dir / "plug-0.9.0.whl"
+        previous_wheel_path.write_bytes(previous_wheel_bytes)
+        previous_manifest = install_dir / "manifest.json"
+        previous_manifest.write_text('{"plugin_name":"plug","version":"0.9.0"}')
+
+        wheel_content = b"new (unsigned) wheel"
+        sha256 = hashlib.sha256(wheel_content).hexdigest()
+        download_info = PluginDownloadInfo(
+            filename="plug-1.0.0.whl",
+            sha256=sha256,
+            version="1.0.0",
+            size_bytes=len(wheel_content),
+        )
+
+        from ggshield.core.plugin.signature import (
+            SignatureStatus,
+            SignatureVerificationError,
+        )
+
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ), patch(
+            "ggshield.core.plugin.downloader.verify_wheel_signature",
+            side_effect=SignatureVerificationError(SignatureStatus.MISSING, "missing"),
+        ):
+            downloader = PluginDownloader()
+            with pytest.raises(SignatureVerificationError):
+                downloader.download_and_install(
+                    download_info, iter([wheel_content]), "plug"
+                )
+
+        # Previous install untouched.
+        assert previous_wheel_path.exists()
+        assert previous_wheel_path.read_bytes() == previous_wheel_bytes
+        assert previous_manifest.exists()
+        # And the temp file got cleaned up.
+        assert not (install_dir / "plug-1.0.0.whl.tmp").exists()
+
+
+class TestSecurityHelpers:
+    """Tests for module-level security helpers in downloader.py."""
+
+    def test_assert_all_https_rejects_http_hop(self) -> None:
+        """A redirect through HTTP raises InsecureSourceError."""
+        from ggshield.core.plugin.downloader import _assert_all_https
+
+        hop = MagicMock()
+        hop.url = "http://example.com/insecure"
+        response = MagicMock()
+        response.history = [hop]
+        response.url = "https://example.com/final"
+
+        with pytest.raises(InsecureSourceError, match="insecure redirect"):
+            _assert_all_https(response)
+
+
+class TestGetSignatureLabelExtra:
+    """Additional get_signature_label coverage."""
+
+    def test_signed_without_identity(self) -> None:
+        """A valid signature without identity returns plain 'signed'."""
+        manifest = {"signature": {"status": "valid"}}
+        assert get_signature_label(manifest) == "signed"
+
+
+class TestDownloadAndInstallBundleCleanup:
+    """Tests for the finally-clause bundle cleanup in download_and_install."""
+
+    def test_temp_bundle_cleaned_up_on_sha_mismatch(self, tmp_path: Path) -> None:
+        """Temp bundle file written before SHA verification is removed
+        when the install fails downstream."""
+        wheel_content = b"actual bytes"
+        wrong_sha = "0" * 64
+        download_info = PluginDownloadInfo(
+            filename="plug-1.0.0.whl",
+            sha256=wrong_sha,
+            version="1.0.0",
+            size_bytes=len(wheel_content),
+        )
+
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            with pytest.raises(ChecksumMismatchError):
+                downloader.download_and_install(
+                    download_info,
+                    iter([wheel_content]),
+                    "plug",
+                    bundle_bytes=b"some bundle",
+                )
+
+        # Neither the temp wheel nor the temp bundle should remain.
+        plugin_dir = tmp_path / "plug"
+        for name in plugin_dir.iterdir() if plugin_dir.exists() else []:
+            assert not name.name.endswith(".tmp")
+            assert not name.name.endswith(".tmp.sigstore")
