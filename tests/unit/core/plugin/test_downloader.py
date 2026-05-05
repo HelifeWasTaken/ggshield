@@ -2078,3 +2078,353 @@ class TestDownloadFromGithubReleaseFinally:
 
         # No leftover .tmp manifest.
         assert not (plugin_dir / "manifest.json.tmp").exists()
+
+
+class TestInstallFromWheelBundleCopy:
+    """Cover install_from_wheel copying a co-located bundle (line 372)."""
+
+    def test_install_from_wheel_copies_bundle_when_present(
+        self, tmp_path: Path
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        wheel_path = create_test_wheel(source_dir, "bundleplugin", "1.0.0")
+        bundle_path = source_dir / f"{wheel_path.name}.sigstore"
+        bundle_path.write_bytes(b"fake-bundle")
+
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=plugins_dir
+        ):
+            with patch(
+                "ggshield.core.plugin.downloader.verify_wheel_signature",
+                return_value=MOCK_SIG_INFO,
+            ):
+                with patch(
+                    "ggshield.core.plugin.signature.get_bundle_path",
+                    return_value=bundle_path,
+                ):
+                    downloader = PluginDownloader()
+                    downloader.install_from_wheel(wheel_path)
+
+        installed_bundle = plugins_dir / "bundleplugin" / bundle_path.name
+        assert installed_bundle.exists()
+        assert installed_bundle.read_bytes() == b"fake-bundle"
+
+
+class TestGitHubArtifactExtraEdgeCases:
+    """Cover remaining download_from_github_artifact branches.
+
+    Lines 629-630 (safe_unpack failure), 642 (multiple wheels warning),
+    652-653 (WheelError), 675-676 (bundle copy).
+    """
+
+    def test_safe_unpack_failure_raises_artifact_error(self, tmp_path: Path) -> None:
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+
+        artifact_content = _create_artifact_zip(b"x", "ignored.txt")
+        mock_response = MagicMock()
+        mock_response.iter_content.return_value = [artifact_content]
+        mock_response.raise_for_status = MagicMock()
+
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=plugins_dir
+        ):
+            with patch("requests.get", return_value=mock_response):
+                with patch(
+                    "ggshield.utils.archive.safe_unpack",
+                    side_effect=RuntimeError("zip slip"),
+                ):
+                    with patch.dict("os.environ", {"GITHUB_TOKEN": "tok"}):
+                        downloader = PluginDownloader()
+                        with pytest.raises(GitHubArtifactError) as exc:
+                            downloader.download_from_github_artifact(
+                                "https://github.com/o/r/actions/runs/1/artifacts/2"
+                            )
+        assert "Failed to extract artifact" in str(exc.value)
+
+    def test_multiple_wheels_logs_warning_and_picks_first(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+
+        wheel_dir = tmp_path / "wheels"
+        wheel_dir.mkdir()
+        wheel_a = create_test_wheel(wheel_dir, "alpha", "1.0.0")
+        wheel_b = create_test_wheel(wheel_dir, "beta", "2.0.0")
+
+        import io
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zf:
+            zf.writestr(wheel_a.name, wheel_a.read_bytes())
+            zf.writestr(wheel_b.name, wheel_b.read_bytes())
+        artifact_content = buffer.getvalue()
+
+        mock_response = MagicMock()
+        mock_response.iter_content.return_value = [artifact_content]
+        mock_response.raise_for_status = MagicMock()
+
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=plugins_dir
+        ):
+            with patch("requests.get", return_value=mock_response):
+                with patch(
+                    "ggshield.core.plugin.downloader.verify_wheel_signature",
+                    return_value=MOCK_SIG_INFO,
+                ):
+                    with patch.dict("os.environ", {"GITHUB_TOKEN": "tok"}):
+                        with caplog.at_level("WARNING"):
+                            downloader = PluginDownloader()
+                            plugin_name, _, _ = (
+                                downloader.download_from_github_artifact(
+                                    "https://github.com/o/r/actions/runs/1/artifacts/2"
+                                )
+                            )
+
+        assert plugin_name == "alpha"
+        assert any("Multiple wheel files" in rec.message for rec in caplog.records)
+
+    def test_invalid_wheel_in_artifact_raises_download_error(
+        self, tmp_path: Path
+    ) -> None:
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+
+        artifact_content = _create_artifact_zip(
+            b"not-a-zip", "broken-1.0.0-py3-none-any.whl"
+        )
+
+        mock_response = MagicMock()
+        mock_response.iter_content.return_value = [artifact_content]
+        mock_response.raise_for_status = MagicMock()
+
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=plugins_dir
+        ):
+            with patch("requests.get", return_value=mock_response):
+                with patch.dict("os.environ", {"GITHUB_TOKEN": "tok"}):
+                    downloader = PluginDownloader()
+                    with pytest.raises(DownloadError) as exc:
+                        downloader.download_from_github_artifact(
+                            "https://github.com/o/r/actions/runs/1/artifacts/2"
+                        )
+        assert "Invalid wheel in artifact" in str(exc.value)
+
+    def test_artifact_copies_sigstore_bundle_when_present(self, tmp_path: Path) -> None:
+        plugins_dir = tmp_path / "plugins"
+        plugins_dir.mkdir()
+
+        wheel_dir = tmp_path / "wheels"
+        wheel_dir.mkdir()
+        wheel_path = create_test_wheel(wheel_dir, "sigplugin", "1.0.0")
+        wheel_bytes = wheel_path.read_bytes()
+
+        import io
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as zf:
+            zf.writestr(wheel_path.name, wheel_bytes)
+            zf.writestr(wheel_path.name + ".sigstore", b"bundle-bytes")
+        artifact_content = buffer.getvalue()
+
+        mock_response = MagicMock()
+        mock_response.iter_content.return_value = [artifact_content]
+        mock_response.raise_for_status = MagicMock()
+
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=plugins_dir
+        ):
+            with patch("requests.get", return_value=mock_response):
+                with patch(
+                    "ggshield.core.plugin.downloader.verify_wheel_signature",
+                    return_value=MOCK_SIG_INFO,
+                ):
+                    with patch.dict("os.environ", {"GITHUB_TOKEN": "tok"}):
+                        downloader = PluginDownloader()
+                        downloader.download_from_github_artifact(
+                            "https://github.com/o/r/actions/runs/1/artifacts/2"
+                        )
+
+        installed_bundle = plugins_dir / "sigplugin" / (wheel_path.name + ".sigstore")
+        assert installed_bundle.exists()
+        assert installed_bundle.read_bytes() == b"bundle-bytes"
+
+
+class TestUninstallInvalidName:
+    """Cover uninstall rejecting unsafe plugin names (lines 703-704)."""
+
+    def test_uninstall_rejects_invalid_name(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            with caplog.at_level("WARNING"):
+                assert downloader.uninstall("../escape") is False
+        assert any("Invalid plugin name" in rec.message for rec in caplog.records)
+
+
+class TestManifestPathErrors:
+    """Cover _get_manifest_path branches via public callers."""
+
+    def test_get_manifest_invalid_name_returns_none(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Lines 737-738: invalid plugin name path."""
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            with caplog.at_level("WARNING"):
+                assert downloader.get_manifest("../escape") is None
+        assert any("Invalid plugin name" in rec.message for rec in caplog.records)
+
+    def test_get_manifest_dir_without_manifest_returns_none(
+        self, tmp_path: Path
+    ) -> None:
+        """Line 746: plugin dir exists but has no manifest.json."""
+        plugin_dir = tmp_path / "noManifestPlugin"
+        plugin_dir.mkdir()
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            assert downloader.get_manifest("noManifestPlugin") is None
+
+
+class TestFindPluginDirByEntryPointBranches:
+    """Cover defensive branches in _find_plugin_dir_by_entry_point."""
+
+    def test_skips_files_in_plugins_dir(self, tmp_path: Path) -> None:
+        """Line 756: plain file in plugins_dir is skipped."""
+        (tmp_path / "stray.txt").write_text("hi")
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            # Lookup by entry-point name with no matching dirs returns None
+            # without crashing on the stray file.
+            assert downloader.get_manifest("anyplugin") is None
+
+    def test_skips_dirs_without_manifest(self, tmp_path: Path) -> None:
+        """Line 760: directory without manifest.json is skipped."""
+        (tmp_path / "emptydir").mkdir()
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            assert downloader.get_manifest("anyplugin") is None
+
+    def test_handles_invalid_manifest_json(self, tmp_path: Path) -> None:
+        """Lines 772-773: dir with invalid JSON manifest is skipped."""
+        plugin_dir = tmp_path / "broken"
+        plugin_dir.mkdir()
+        (plugin_dir / "manifest.json").write_text("{not-json}")
+        # Different lookup name so we exercise entry-point traversal.
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            assert downloader.get_manifest("entrypointname") is None
+
+
+class TestGetWheelPathInvalidJson:
+    """Cover get_wheel_path JSON decode fallthrough (lines 797-800)."""
+
+    def test_invalid_json_manifest_returns_none(self, tmp_path: Path) -> None:
+        plugin_dir = tmp_path / "badjson"
+        plugin_dir.mkdir()
+        (plugin_dir / "manifest.json").write_text("{not-valid-json}")
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            assert downloader.get_wheel_path("badjson") is None
+
+
+class TestGetManifestInvalidJson:
+    """Cover get_manifest JSON decode fallthrough (lines 810-811)."""
+
+    def test_invalid_json_returns_none(self, tmp_path: Path) -> None:
+        plugin_dir = tmp_path / "badjson2"
+        plugin_dir.mkdir()
+        (plugin_dir / "manifest.json").write_text("{not-valid-json}")
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            assert downloader.get_manifest("badjson2") is None
+
+
+class TestGetInstalledSignatureLabelMissingPlugin:
+    """Cover get_installed_signature_label early-return (line 817)."""
+
+    def test_returns_none_for_missing_plugin(self, tmp_path: Path) -> None:
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            assert downloader.get_installed_signature_label("nope") is None
+
+
+class TestGetPluginSourceInvalidSourceDict:
+    """Cover get_plugin_source PluginSource.from_dict failure (lines 842-843)."""
+
+    def test_source_missing_type_returns_none(self, tmp_path: Path) -> None:
+        plugin_dir = tmp_path / "bad_source"
+        plugin_dir.mkdir()
+        manifest = {
+            "plugin_name": "bad_source",
+            "version": "1.0.0",
+            "wheel_filename": "bad_source-1.0.0.whl",
+            "sha256": "deadbeef",
+            "source": {"url": "https://example.com"},  # missing "type"
+        }
+        (plugin_dir / "manifest.json").write_text(json.dumps(manifest))
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            assert downloader.get_plugin_source("bad_source") is None
+
+    def test_source_unknown_type_returns_none(self, tmp_path: Path) -> None:
+        plugin_dir = tmp_path / "weird_source"
+        plugin_dir.mkdir()
+        manifest = {
+            "plugin_name": "weird_source",
+            "version": "1.0.0",
+            "wheel_filename": "weird_source-1.0.0.whl",
+            "sha256": "deadbeef",
+            "source": {"type": "wormhole"},  # unknown enum value
+        }
+        (plugin_dir / "manifest.json").write_text(json.dumps(manifest))
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            assert downloader.get_plugin_source("weird_source") is None
+
+
+class TestIsValidPluginNameRejections:
+    """Cover _is_valid_plugin_name reject branches (lines 849, 853)."""
+
+    @pytest.mark.parametrize("name", ["", ".", ".."])
+    def test_rejects_empty_or_dot_segments(self, tmp_path: Path, name: str) -> None:
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            assert downloader.uninstall(name) is False
+
+    def test_rejects_null_byte(self, tmp_path: Path) -> None:
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            downloader = PluginDownloader()
+            assert downloader.uninstall("foo\x00bar") is False
