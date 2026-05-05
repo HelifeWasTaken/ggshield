@@ -286,6 +286,20 @@ class PluginDownloader:
                 signature_info=sig_info,
             )
 
+            # Migrate a legacy install that lived under the catalog
+            # reference instead of the wheel distribution name (older
+            # ggshield versions named the dir after ``plugin_name``).
+            # If a directory at ``plugins_dir/<plugin_name>`` exists,
+            # is distinct from the new install dir, and looks like a
+            # plugin (manifest present), remove it. Otherwise
+            # ``_resolve_plugin_dir(plugin_name)`` would keep returning
+            # the stale directory and ``status``/``update`` would read
+            # the pre-upgrade version.
+            self._cleanup_legacy_install_dir(
+                catalog_reference=plugin_name,
+                current_dir=plugin_dir,
+            )
+
             logger.info("Installed %s v%s", install_dir_name, download_info.version)
             return wheel_path
 
@@ -943,6 +957,52 @@ class PluginDownloader:
             wheel_path.unlink()
 
         self._remove_bundle_files(wheel_path)
+
+    def _cleanup_legacy_install_dir(
+        self, catalog_reference: str, current_dir: Path
+    ) -> None:
+        """Remove a stale install dir named after the catalog reference.
+
+        Older ggshield builds named the on-disk plugin directory after
+        the catalog reference (``plugin_name``) regardless of the
+        wheel's distribution name. The current install dir comes from
+        the wheel distribution name, so a user upgrading from one of
+        those builds can end up with two directories: a stale legacy
+        one keyed on ``catalog_reference`` and the current one keyed
+        on the wheel name. ``_resolve_plugin_dir`` prefers the
+        direct-name match, so without this cleanup ``status`` and
+        ``update`` would keep reading the pre-upgrade manifest.
+
+        We only remove the legacy dir when:
+        - it's distinct from ``current_dir`` (the new install we just
+          finished writing), and
+        - it has a ``manifest.json`` (so it really is a plugin
+          directory, not some unrelated path).
+        """
+        if not self._is_valid_plugin_name(catalog_reference):
+            return
+        legacy_dir = self.plugins_dir / catalog_reference
+        if not legacy_dir.exists() or legacy_dir.resolve() == current_dir.resolve():
+            return
+        if not (legacy_dir / "manifest.json").exists():
+            return
+        try:
+            shutil.rmtree(legacy_dir)
+        except OSError as exc:
+            logger.warning(
+                "Failed to remove stale plugin dir %s: %s", legacy_dir, exc
+            )
+            return
+        # Drop the trust record for the legacy entry so a future install
+        # under the catalog reference doesn't inherit a stale SHA from
+        # the now-removed wheel.
+        try:
+            self.trust_store.revoke_plugin(catalog_reference)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "Failed to revoke trust record for %s: %s", catalog_reference, exc
+            )
+        logger.info("Removed legacy plugin dir %s", legacy_dir)
 
     def _extract_github_repo(self, url: str) -> Optional[str]:
         """Extract owner/repo from a GitHub URL."""
