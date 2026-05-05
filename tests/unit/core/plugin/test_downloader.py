@@ -1621,3 +1621,122 @@ def _create_artifact_zip(content: bytes, filename: str) -> bytes:
     with zipfile.ZipFile(buffer, "w") as zf:
         zf.writestr(filename, content)
     return buffer.getvalue()
+
+
+class TestCleanupLegacyInstallDir:
+    """Tests for PluginDownloader._cleanup_legacy_install_dir.
+
+    Covers the upgrade path from older ggshield builds that named the
+    plugin directory after the catalog reference instead of the wheel's
+    distribution name.
+    """
+
+    def _downloader(self, tmp_path: Path) -> "PluginDownloader":
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ):
+            return PluginDownloader()
+
+    def test_removes_legacy_dir_with_manifest(self, tmp_path: Path) -> None:
+        """Legacy ``plugins_dir/<reference>/`` with a manifest gets removed."""
+        downloader = self._downloader(tmp_path)
+        legacy = tmp_path / "machine_scan"
+        legacy.mkdir()
+        (legacy / "manifest.json").write_text("{}")
+        new_install = tmp_path / "satori-python"
+        new_install.mkdir()
+
+        downloader._cleanup_legacy_install_dir(
+            catalog_reference="machine_scan", current_dir=new_install
+        )
+
+        assert not legacy.exists()
+        assert new_install.exists()
+
+    def test_keeps_dir_when_same_as_current(self, tmp_path: Path) -> None:
+        """When wheel-distribution-name == catalog-reference, no migration."""
+        downloader = self._downloader(tmp_path)
+        plugin_dir = tmp_path / "tokenscanner"
+        plugin_dir.mkdir()
+        (plugin_dir / "manifest.json").write_text("{}")
+
+        downloader._cleanup_legacy_install_dir(
+            catalog_reference="tokenscanner", current_dir=plugin_dir
+        )
+
+        assert plugin_dir.exists()
+
+    def test_skips_dir_without_manifest(self, tmp_path: Path) -> None:
+        """A bare directory without a manifest isn't a plugin install — leave it alone."""
+        downloader = self._downloader(tmp_path)
+        not_a_plugin = tmp_path / "machine_scan"
+        not_a_plugin.mkdir()
+        (not_a_plugin / "random.txt").write_text("hi")
+        new_install = tmp_path / "satori-python"
+        new_install.mkdir()
+
+        downloader._cleanup_legacy_install_dir(
+            catalog_reference="machine_scan", current_dir=new_install
+        )
+
+        assert not_a_plugin.exists()
+
+    def test_skips_when_legacy_dir_missing(self, tmp_path: Path) -> None:
+        """No-op when the catalog-reference directory doesn't exist."""
+        downloader = self._downloader(tmp_path)
+        new_install = tmp_path / "satori-python"
+        new_install.mkdir()
+
+        # Should not raise.
+        downloader._cleanup_legacy_install_dir(
+            catalog_reference="machine_scan", current_dir=new_install
+        )
+
+    def test_rejects_invalid_catalog_reference(self, tmp_path: Path) -> None:
+        """An invalid name (path-traversal etc.) is silently ignored."""
+        downloader = self._downloader(tmp_path)
+        new_install = tmp_path / "satori-python"
+        new_install.mkdir()
+
+        # Should not raise even though "../etc" is bogus.
+        downloader._cleanup_legacy_install_dir(
+            catalog_reference="../etc", current_dir=new_install
+        )
+
+    def test_swallows_oserror_during_rmtree(self, tmp_path: Path) -> None:
+        """Filesystem error during rmtree is logged, not raised."""
+        downloader = self._downloader(tmp_path)
+        legacy = tmp_path / "machine_scan"
+        legacy.mkdir()
+        (legacy / "manifest.json").write_text("{}")
+        new_install = tmp_path / "satori-python"
+        new_install.mkdir()
+
+        with patch(
+            "ggshield.core.plugin.downloader.shutil.rmtree",
+            side_effect=OSError("permission denied"),
+        ):
+            downloader._cleanup_legacy_install_dir(
+                catalog_reference="machine_scan", current_dir=new_install
+            )
+
+        # Did not crash. The legacy dir is still there because rmtree raised.
+        assert legacy.exists()
+
+    def test_revokes_trust_record_after_removal(self, tmp_path: Path) -> None:
+        """After removing the legacy dir, the trust record keyed on the
+        catalog reference is revoked so a fresh install under that key
+        doesn't inherit a stale SHA."""
+        downloader = self._downloader(tmp_path)
+        legacy = tmp_path / "machine_scan"
+        legacy.mkdir()
+        (legacy / "manifest.json").write_text("{}")
+        new_install = tmp_path / "satori-python"
+        new_install.mkdir()
+        downloader.trust_store = MagicMock()
+
+        downloader._cleanup_legacy_install_dir(
+            catalog_reference="machine_scan", current_dir=new_install
+        )
+
+        downloader.trust_store.revoke_plugin.assert_called_once_with("machine_scan")

@@ -336,3 +336,137 @@ class TestPluginAPIClient:
         client = PluginAPIClient(mock_gg_client)
         # Must not raise
         client.report_installation("tokenscanner", "1.0.0", "linux", "x86_64")
+
+
+class TestDownloadSignatureBundle:
+    """Tests for PluginAPIClient.download_signature_bundle."""
+
+    @pytest.fixture
+    def mock_gg_client(self) -> MagicMock:
+        client = MagicMock()
+        client.base_uri = "https://api.gitguardian.com/"
+        client.api_key = "test-api-key"
+        client.session = MagicMock()
+        return client
+
+    def test_returns_bundle_bytes(self, mock_gg_client: MagicMock) -> None:
+        """A normal HTTPS bundle download returns the body bytes."""
+        body = b"sigstore bundle bytes"
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.history = []
+        mock_response.url = (
+            "https://api.gitguardian.com/v1/endpoints/plugins/p/signature"
+        )
+        mock_response.headers = {"Content-Length": str(len(body))}
+        mock_response.iter_content.return_value = iter([body])
+        mock_gg_client.session.get.return_value = mock_response
+
+        client = PluginAPIClient(mock_gg_client)
+        result = client.download_signature_bundle(
+            "https://api.gitguardian.com/v1/endpoints/plugins/p/signature"
+        )
+
+        assert result == body
+
+    def test_rejects_foreign_origin(self, mock_gg_client: MagicMock) -> None:
+        """A signature URL on a different origin is rejected before sending the request."""
+        client = PluginAPIClient(mock_gg_client)
+        with pytest.raises(PluginAPIError, match="foreign origin"):
+            client.download_signature_bundle("https://evil.example.com/bundle.sigstore")
+        mock_gg_client.session.get.assert_not_called()
+
+    def test_rejects_oversize_bundle_via_content_length(
+        self, mock_gg_client: MagicMock
+    ) -> None:
+        """A Content-Length above the cap is rejected before reading the body."""
+        from ggshield.core.plugin.client import MAX_BUNDLE_SIZE_BYTES
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.history = []
+        mock_response.url = (
+            "https://api.gitguardian.com/v1/endpoints/plugins/p/signature"
+        )
+        mock_response.headers = {"Content-Length": str(MAX_BUNDLE_SIZE_BYTES + 1)}
+        mock_gg_client.session.get.return_value = mock_response
+
+        client = PluginAPIClient(mock_gg_client)
+        with pytest.raises(PluginAPIError, match="exceeds maximum"):
+            client.download_signature_bundle(
+                "https://api.gitguardian.com/v1/endpoints/plugins/p/signature"
+            )
+
+    def test_rejects_oversize_streaming_body(
+        self, mock_gg_client: MagicMock
+    ) -> None:
+        """If Content-Length lies, the streaming-read cap still kicks in."""
+        from ggshield.core.plugin.client import MAX_BUNDLE_SIZE_BYTES
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.history = []
+        mock_response.url = (
+            "https://api.gitguardian.com/v1/endpoints/plugins/p/signature"
+        )
+        mock_response.headers = {"Content-Length": "0"}  # lie about size
+        # Stream more bytes than the cap allows.
+        mock_response.iter_content.return_value = iter(
+            [b"x" * (MAX_BUNDLE_SIZE_BYTES + 1)]
+        )
+        mock_gg_client.session.get.return_value = mock_response
+
+        client = PluginAPIClient(mock_gg_client)
+        with pytest.raises(PluginAPIError, match="exceeded maximum"):
+            client.download_signature_bundle(
+                "https://api.gitguardian.com/v1/endpoints/plugins/p/signature"
+            )
+
+    def test_wraps_network_error(self, mock_gg_client: MagicMock) -> None:
+        """A requests exception is re-raised as PluginAPIError."""
+        mock_gg_client.session.get.side_effect = requests.RequestException("boom")
+
+        client = PluginAPIClient(mock_gg_client)
+        with pytest.raises(PluginAPIError, match="Failed to download signature bundle"):
+            client.download_signature_bundle(
+                "https://api.gitguardian.com/v1/endpoints/plugins/p/signature"
+            )
+
+
+class TestExtractServerDetail:
+    """Tests for the ``_extract_server_detail`` helper used to surface DRF
+    error-detail strings to the user."""
+
+    def test_returns_detail_when_present(self) -> None:
+        from ggshield.core.plugin.client import _extract_server_detail
+
+        response = MagicMock()
+        response.json.return_value = {"detail": "Plugin disabled"}
+        assert _extract_server_detail(response) == "Plugin disabled"
+
+    def test_returns_none_for_non_json_body(self) -> None:
+        from ggshield.core.plugin.client import _extract_server_detail
+
+        response = MagicMock()
+        response.json.side_effect = ValueError("not json")
+        assert _extract_server_detail(response) is None
+
+    def test_returns_none_for_request_exception(self) -> None:
+        from ggshield.core.plugin.client import _extract_server_detail
+
+        response = MagicMock()
+        response.json.side_effect = requests.RequestException("network")
+        assert _extract_server_detail(response) is None
+
+    def test_returns_none_when_detail_missing_or_non_string(self) -> None:
+        from ggshield.core.plugin.client import _extract_server_detail
+
+        response = MagicMock()
+        response.json.return_value = {"detail": 42}  # non-string
+        assert _extract_server_detail(response) is None
+
+        response.json.return_value = {"other": "field"}
+        assert _extract_server_detail(response) is None
+
+        response.json.return_value = ["just", "a", "list"]
+        assert _extract_server_detail(response) is None
