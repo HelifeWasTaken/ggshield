@@ -229,6 +229,15 @@ class PluginDownloader:
         wheel_path = plugin_dir / download_info.filename
         temp_path = plugin_dir / f"{download_info.filename}.tmp"
 
+        # Drop the new bundle next to the TEMP wheel so verification can
+        # happen before we touch the previous install. ``temp_bundle_path``
+        # is cleaned up alongside ``temp_path`` in the finally block.
+        temp_bundle_path = (
+            temp_path.parent / (temp_path.name + ".sigstore")
+            if bundle_bytes is not None
+            else None
+        )
+
         try:
             logger.info("Installing %s...", download_info.filename)
             sha256_hash = hashlib.sha256()
@@ -241,16 +250,24 @@ class PluginDownloader:
             if computed_hash.lower() != download_info.sha256.lower():
                 raise ChecksumMismatchError(download_info.sha256, computed_hash)
 
-            # Remove any stale bundle sidecars before moving the new wheel
-            # into place, then drop the fresh one (if provided) so
-            # `verify_wheel_signature` below can find it.
+            if temp_bundle_path is not None:
+                temp_bundle_path.write_bytes(bundle_bytes)  # type: ignore[arg-type]
+
+            # Verify on the temp wheel BEFORE we touch the existing
+            # install. ``verify_wheel_signature`` looks for the bundle
+            # next to the wheel; we placed it next to ``temp_path`` for
+            # exactly that. A STRICT failure here leaves the previous
+            # working wheel + manifest intact.
+            sig_info = verify_wheel_signature(temp_path, signature_mode)
+
+            # Verification passed: now safe to swap. Remove the stale
+            # bundle sidecars, move the new wheel into place, then drop
+            # the fresh bundle next to it.
             self._remove_bundle_files(wheel_path)
             temp_path.replace(wheel_path)
-            if bundle_bytes is not None:
-                bundle_path = wheel_path.parent / (wheel_path.name + ".sigstore")
-                bundle_path.write_bytes(bundle_bytes)
-
-            sig_info = verify_wheel_signature(wheel_path, signature_mode)
+            if temp_bundle_path is not None:
+                final_bundle_path = wheel_path.parent / (wheel_path.name + ".sigstore")
+                temp_bundle_path.replace(final_bundle_path)
 
             if source is None:
                 source = PluginSource(type=PluginSourceType.PLATFORM)
@@ -273,14 +290,23 @@ class PluginDownloader:
             return wheel_path
 
         except SignatureVerificationError:
-            self._cleanup_failed_install(wheel_path)
+            # Verification ran on the temp wheel, so the existing install
+            # (if any) is untouched. Only the temp files need cleanup —
+            # handled by the finally block.
             raise
         except Exception:
-            self._cleanup_failed_install(wheel_path)
+            # ChecksumMismatchError or any other error that fires before
+            # we replace the existing wheel: the previous install is
+            # untouched. After the swap, ``wheel_path`` exists; clean it
+            # up so we don't leave half-installed bytes behind.
+            if wheel_path.exists() and not temp_path.exists():
+                self._cleanup_failed_install(wheel_path)
             raise
         finally:
             if temp_path.exists():
                 temp_path.unlink()
+            if temp_bundle_path is not None and temp_bundle_path.exists():
+                temp_bundle_path.unlink()
 
     def install_from_wheel(
         self,
