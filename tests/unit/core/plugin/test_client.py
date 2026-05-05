@@ -9,7 +9,6 @@ from ggshield.core.plugin.client import (
     PluginAPIClient,
     PluginAPIError,
     PluginCatalog,
-    PluginDownloadInfo,
     PluginInfo,
     PluginNotAvailableError,
     PluginsNotEnabledError,
@@ -397,9 +396,7 @@ class TestDownloadSignatureBundle:
                 "https://api.gitguardian.com/v1/endpoints/plugins/p/signature"
             )
 
-    def test_rejects_oversize_streaming_body(
-        self, mock_gg_client: MagicMock
-    ) -> None:
+    def test_rejects_oversize_streaming_body(self, mock_gg_client: MagicMock) -> None:
         """If Content-Length lies, the streaming-read cap still kicks in."""
         from ggshield.core.plugin.client import MAX_BUNDLE_SIZE_BYTES
 

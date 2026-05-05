@@ -989,9 +989,7 @@ class PluginDownloader:
         try:
             shutil.rmtree(legacy_dir)
         except OSError as exc:
-            logger.warning(
-                "Failed to remove stale plugin dir %s: %s", legacy_dir, exc
-            )
+            logger.warning("Failed to remove stale plugin dir %s: %s", legacy_dir, exc)
             return
         # Drop the trust record for the legacy entry so a future install
         # under the catalog reference doesn't inherit a stale SHA from

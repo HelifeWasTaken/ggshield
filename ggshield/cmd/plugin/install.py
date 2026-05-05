@@ -20,13 +20,13 @@ from ggshield.core.plugin.client import (
     PluginsNotEnabledError,
     PluginSourceType,
 )
-from ggshield.core.plugin.platform import get_platform_info
 from ggshield.core.plugin.downloader import (
     ChecksumMismatchError,
     GitHubArtifactError,
     InsecureSourceError,
     PluginDownloader,
 )
+from ggshield.core.plugin.platform import get_platform_info
 from ggshield.core.plugin.signature import (
     SignatureVerificationError,
     SignatureVerificationMode,
