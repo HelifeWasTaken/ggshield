@@ -1887,6 +1887,47 @@ class TestGetSignatureLabelExtra:
 class TestDownloadAndInstallBundleCleanup:
     """Tests for the finally-clause bundle cleanup in download_and_install."""
 
+    def test_temp_bundle_cleaned_up_when_signature_fails(self, tmp_path: Path) -> None:
+        """Temp bundle file written before signature verification is
+        removed when verification fails (the only path that exercises
+        the temp bundle's finally-clause unlink)."""
+        wheel_content = b"actual bytes"
+        sha256 = hashlib.sha256(wheel_content).hexdigest()
+        download_info = PluginDownloadInfo(
+            filename="plug-1.0.0.whl",
+            sha256=sha256,
+            version="1.0.0",
+            size_bytes=len(wheel_content),
+        )
+        from ggshield.core.plugin.signature import (
+            SignatureStatus,
+            SignatureVerificationError,
+        )
+
+        with patch(
+            "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ), patch(
+            "ggshield.core.plugin.downloader.verify_wheel_signature",
+            side_effect=SignatureVerificationError(
+                SignatureStatus.MISSING, "no bundle"
+            ),
+        ):
+            downloader = PluginDownloader()
+            with pytest.raises(SignatureVerificationError):
+                downloader.download_and_install(
+                    download_info,
+                    iter([wheel_content]),
+                    "plug",
+                    bundle_bytes=b"some bundle",
+                )
+
+        # Temp wheel and temp bundle both gone after the failure.
+        plugin_dir = tmp_path / "plug"
+        if plugin_dir.exists():
+            for entry in plugin_dir.iterdir():
+                assert not entry.name.endswith(".tmp")
+                assert not entry.name.endswith(".tmp.sigstore")
+
     def test_temp_bundle_cleaned_up_on_sha_mismatch(self, tmp_path: Path) -> None:
         """Temp bundle file written before SHA verification is removed
         when the install fails downstream."""
@@ -1916,3 +1957,23 @@ class TestDownloadAndInstallBundleCleanup:
         for name in plugin_dir.iterdir() if plugin_dir.exists() else []:
             assert not name.name.endswith(".tmp")
             assert not name.name.endswith(".tmp.sigstore")
+
+
+class TestStreamToFile:
+    """Tests for the module-level _stream_to_file helper."""
+
+    def test_skips_empty_chunks_and_caps_oversized_body(self, tmp_path: Path) -> None:
+        """Empty chunks (line 94 ``continue``) and the size cap (line 97
+        ``raise``) are both exercised here."""
+        from ggshield.core.plugin.downloader import _stream_to_file
+
+        response = MagicMock()
+        # Empty chunk (skipped), then a chunk that exceeds the cap.
+        response.iter_content.return_value = iter([b"", b"x" * 100])
+
+        dest = tmp_path / "out.bin"
+        with pytest.raises(DownloadError, match="exceeded maximum"):
+            _stream_to_file(response, dest, max_bytes=50)
+
+        # Partial file removed before re-raise.
+        assert not dest.exists()

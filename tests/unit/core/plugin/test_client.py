@@ -635,3 +635,13 @@ class TestSecurityHelpers:
         # Second chunk pushes total past the cap.
         with pytest.raises(PluginAPIError, match="exceeded maximum"):
             next(gen)
+
+
+class TestPluginSourceTypeMissingFallback:
+    """``_missing_`` only handles the legacy 'gitguardian_api' name; any
+    other unknown value should hit the ``return None`` fallback (which
+    coerces the constructor to raise ValueError)."""
+
+    def test_unknown_value_raises_value_error(self) -> None:
+        with pytest.raises(ValueError):
+            PluginSourceType("definitely-not-a-real-source")
