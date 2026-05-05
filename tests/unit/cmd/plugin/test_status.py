@@ -165,7 +165,6 @@ class TestPluginStatus:
         THEN it shows the human-readable signature label.
         """
         mock_catalog = PluginCatalog(
-            plan="Enterprise",
             plugins=[
                 PluginInfo(
                     name="tokenscanner",
@@ -176,7 +175,6 @@ class TestPluginStatus:
                     reason=None,
                 ),
             ],
-            features={},
         )
 
         with (

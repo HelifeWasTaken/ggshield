@@ -711,7 +711,7 @@ class TestInstallFromLocalWheel:
 
             result = cli_fs_runner.invoke(
                 cli,
-                ["plugin", "install", str(wheel_path), "--force"],
+                ["plugin", "install", str(wheel_path)],
                 catch_exceptions=False,
             )
 
@@ -759,7 +759,7 @@ class TestInstallFromLocalWheel:
             )
 
         assert result.exit_code == ExitCode.SUCCESS
-        assert "not from GitGuardian" in result.output
+        assert "Installed myplugin v1.0.0" in result.output
 
 
 class TestInstallFromUrl:
@@ -802,7 +802,6 @@ class TestInstallFromUrl:
                     "https://example.com/plugin.whl",
                     "--sha256",
                     "abc123",
-                    "--force",
                 ],
                 catch_exceptions=False,
             )
@@ -810,7 +809,9 @@ class TestInstallFromUrl:
         assert result.exit_code == ExitCode.SUCCESS
         assert "Installed urlplugin v2.0.0" in result.output
         mock_downloader.download_from_url.assert_called_once_with(
-            "https://example.com/plugin.whl", "abc123", True
+            "https://example.com/plugin.whl",
+            "abc123",
+            signature_mode=mock.ANY,
         )
 
     def test_install_url_warning_no_sha256(self, cli_fs_runner) -> None:
@@ -849,7 +850,7 @@ class TestInstallFromUrl:
             )
 
         assert result.exit_code == ExitCode.SUCCESS
-        assert "No SHA256 checksum provided" in result.output
+        assert "Installed urlplugin v2.0.0" in result.output
 
     def test_install_http_url_rejected(self, cli_fs_runner) -> None:
         """
@@ -882,7 +883,7 @@ class TestInstallFromUrl:
 
             result = cli_fs_runner.invoke(
                 cli,
-                ["plugin", "install", "http://example.com/plugin.whl", "--force"],
+                ["plugin", "install", "http://example.com/plugin.whl"],
             )
 
         assert result.exit_code == ExitCode.USAGE_ERROR
@@ -927,7 +928,6 @@ class TestInstallFromGitHubRelease:
                     "plugin",
                     "install",
                     "https://github.com/owner/repo/releases/download/v1.5.0/plugin.whl",
-                    "--force",
                 ],
                 catch_exceptions=False,
             )
@@ -974,7 +974,6 @@ class TestInstallFromGitHubArtifact:
                     "plugin",
                     "install",
                     "https://github.com/owner/repo/actions/runs/123/artifacts/456",
-                    "--force",
                 ],
                 catch_exceptions=False,
             )
@@ -1059,7 +1058,6 @@ class TestInstallFromGitHubArtifact:
                     "plugin",
                     "install",
                     "https://github.com/owner/repo/actions/runs/123/artifacts/456",
-                    "--force",
                 ],
             )
 
@@ -1121,7 +1119,7 @@ class TestInstallErrorHandling:
 
             result = cli_fs_runner.invoke(
                 cli,
-                ["plugin", "install", str(wheel_path), "--force"],
+                ["plugin", "install", str(wheel_path)],
             )
 
         assert result.exit_code == ExitCode.UNEXPECTED_ERROR
@@ -1154,7 +1152,7 @@ class TestInstallErrorHandling:
 
             result = cli_fs_runner.invoke(
                 cli,
-                ["plugin", "install", str(wheel_path), "--force"],
+                ["plugin", "install", str(wheel_path)],
             )
 
         assert result.exit_code == ExitCode.UNEXPECTED_ERROR
@@ -1192,7 +1190,6 @@ class TestInstallErrorHandling:
                     "https://example.com/plugin.whl",
                     "--sha256",
                     "wrong",
-                    "--force",
                 ],
             )
 
@@ -1225,7 +1222,7 @@ class TestInstallErrorHandling:
 
             result = cli_fs_runner.invoke(
                 cli,
-                ["plugin", "install", "https://example.com/plugin.whl", "--force"],
+                ["plugin", "install", "https://example.com/plugin.whl"],
             )
 
         assert result.exit_code == ExitCode.UNEXPECTED_ERROR
@@ -1253,7 +1250,7 @@ class TestInstallErrorHandling:
 
             result = cli_fs_runner.invoke(
                 cli,
-                ["plugin", "install", "https://example.com/plugin.whl", "--force"],
+                ["plugin", "install", "https://example.com/plugin.whl"],
             )
 
         assert result.exit_code == ExitCode.UNEXPECTED_ERROR
@@ -1291,7 +1288,6 @@ class TestInstallErrorHandling:
                     "https://github.com/owner/repo/releases/download/v1/p.whl",
                     "--sha256",
                     "wrong",
-                    "--force",
                 ],
             )
 
@@ -1328,7 +1324,6 @@ class TestInstallErrorHandling:
                     "plugin",
                     "install",
                     "https://github.com/owner/repo/releases/download/v1/p.whl",
-                    "--force",
                 ],
             )
 
@@ -1363,7 +1358,6 @@ class TestInstallErrorHandling:
                     "plugin",
                     "install",
                     "https://github.com/owner/repo/releases/download/v1/p.whl",
-                    "--force",
                 ],
             )
 
@@ -1400,7 +1394,6 @@ class TestInstallErrorHandling:
                     "plugin",
                     "install",
                     "https://github.com/owner/repo/actions/runs/123/artifacts/456",
-                    "--force",
                 ],
             )
 
@@ -1435,7 +1428,6 @@ class TestInstallErrorHandling:
                     "plugin",
                     "install",
                     "https://github.com/owner/repo/actions/runs/123/artifacts/456",
-                    "--force",
                 ],
             )
 

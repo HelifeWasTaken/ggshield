@@ -608,6 +608,9 @@ class TestPluginDownloader:
 
         with patch(
             "ggshield.core.plugin.downloader.get_plugins_dir", return_value=tmp_path
+        ), patch(
+            "ggshield.core.plugin.downloader.verify_wheel_signature",
+            return_value=MOCK_SIG_INFO,
         ):
             downloader = PluginDownloader()
             result = downloader.download_and_install(

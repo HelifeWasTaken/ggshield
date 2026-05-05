@@ -67,6 +67,10 @@ class PluginSourceType(Enum):
     URL = "url"
     GITHUB_RELEASE = "github_release"
     GITHUB_ARTIFACT = "github_artifact"
+    # Legacy alias kept so attribute-access uses (``PluginSourceType.GITGUARDIAN_API``)
+    # in older code paths and tests still resolve to the same enum member as
+    # ``PLATFORM``. Pairs with ``_missing_`` below for value-based lookup.
+    GITGUARDIAN_API = "platform"
 
     @classmethod
     def _missing_(cls, value: object) -> Optional["PluginSourceType"]:
