@@ -1858,23 +1858,6 @@ class TestDownloadAndInstallBundle:
         assert not (install_dir / "plug-1.0.0.whl.tmp").exists()
 
 
-class TestSecurityHelpers:
-    """Tests for module-level security helpers in downloader.py."""
-
-    def test_assert_all_https_rejects_http_hop(self) -> None:
-        """A redirect through HTTP raises InsecureSourceError."""
-        from ggshield.core.plugin.downloader import _assert_all_https
-
-        hop = MagicMock()
-        hop.url = "http://example.com/insecure"
-        response = MagicMock()
-        response.history = [hop]
-        response.url = "https://example.com/final"
-
-        with pytest.raises(InsecureSourceError, match="insecure redirect"):
-            _assert_all_https(response)
-
-
 class TestGetSignatureLabelExtra:
     """Additional get_signature_label coverage."""
 

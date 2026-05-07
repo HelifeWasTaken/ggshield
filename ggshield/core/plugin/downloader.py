@@ -10,7 +10,7 @@ import re
 import shutil
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Tuple
 
 import requests
@@ -21,6 +21,7 @@ from ggshield.core.plugin.client import (
     PluginSource,
     PluginSourceType,
 )
+from ggshield.core.plugin.http_security import assert_all_https
 from ggshield.core.plugin.signature import (
     SignatureInfo,
     SignatureStatus,
@@ -29,7 +30,12 @@ from ggshield.core.plugin.signature import (
     verify_wheel_signature,
 )
 from ggshield.core.plugin.trust import PluginTrustStore, compute_file_sha256
-from ggshield.core.plugin.wheel_utils import WheelError, extract_wheel_metadata
+from ggshield.core.plugin.wheel_utils import (
+    InvalidWheelError,
+    WheelError,
+    extract_wheel_metadata,
+    sanitize_wheel_filename,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -47,7 +53,7 @@ def _wheel_distribution_name(filename: str) -> str:
     """
     if not filename.endswith(".whl"):
         raise DownloadError(f"Not a wheel filename: {filename!r}")
-    stem = filename[: -len(".whl")]
+    stem = filename.removesuffix(".whl")
     parts = stem.split("-", 1)
     if len(parts) < 2 or not parts[0]:
         raise DownloadError(f"Invalid wheel filename: {filename!r}")
@@ -57,18 +63,6 @@ def _wheel_distribution_name(filename: str) -> str:
 HTTP_TIMEOUT_SECONDS = 30
 MAX_WHEEL_SIZE_BYTES = 256 * 1024 * 1024
 MAX_BUNDLE_SIZE_BYTES = 1 * 1024 * 1024
-
-
-def _assert_all_https(response: "requests.Response") -> None:
-    """Reject a response whose redirect chain went through non-HTTPS.
-
-    Protects against a trusted HTTPS origin redirecting through ``http://``
-    (a downgrade attack). ``requests`` follows redirects transparently, so
-    we inspect ``response.history`` + the final URL after the fact.
-    """
-    for hop in list(response.history) + [response]:
-        if not hop.url.startswith("https://"):
-            raise InsecureSourceError(f"Refusing insecure redirect through {hop.url!r}")
 
 
 def _stream_to_file(
@@ -219,7 +213,7 @@ class PluginDownloader:
         # reference, so the catalog install converges with a previous
         # ``install_from_wheel`` of the same wheel rather than creating
         # a side-by-side directory. ``download_info.filename`` was
-        # validated by the API client (``_sanitize_wheel_filename``) and
+        # validated by the API client (``sanitize_wheel_filename``) and
         # came from the trusted catalog response.
         install_dir_name = _wheel_distribution_name(download_info.filename)
         self._validate_plugin_name(install_dir_name)
@@ -427,8 +421,12 @@ class PluginDownloader:
 
         with tempfile.TemporaryDirectory() as temp_dir:
             raw_filename = url.split("/")[-1].split("?")[0]
-            filename = PurePosixPath(raw_filename).name
-            if not filename or filename in {".", ".."} or not filename.endswith(".whl"):
+            try:
+                filename = sanitize_wheel_filename(raw_filename)
+            except InvalidWheelError:
+                # Fallback for URLs whose tail isn't a recognisable wheel
+                # filename. The actual wheel name is irrelevant on disk —
+                # only the bytes matter for verification.
                 filename = "plugin.whl"
 
             temp_wheel_path = Path(temp_dir) / filename
@@ -436,7 +434,7 @@ class PluginDownloader:
             try:
                 logger.info("Downloading from %s...", url)
                 response = requests.get(url, stream=True, timeout=HTTP_TIMEOUT_SECONDS)
-                _assert_all_https(response)
+                assert_all_https(response, exc_factory=InsecureSourceError)
                 response.raise_for_status()
 
                 computed_hash = _stream_to_file(
@@ -611,7 +609,7 @@ class PluginDownloader:
                     stream=True,
                     timeout=HTTP_TIMEOUT_SECONDS,
                 )
-                _assert_all_https(response)
+                assert_all_https(response, exc_factory=InsecureSourceError)
                 response.raise_for_status()
 
                 _stream_to_file(response, artifact_zip_path, MAX_WHEEL_SIZE_BYTES)
@@ -629,11 +627,13 @@ class PluginDownloader:
             except Exception as e:
                 raise GitHubArtifactError(f"Failed to extract artifact: {e}") from e
 
-            # Sort to ensure deterministic wheel selection when multiple
-            # wheels are shipped in the same artifact — without this, the
-            # order depends on filesystem traversal and an attacker-shaped
-            # artifact could cause different machines to pick different
-            # wheels.
+            # Sort so multi-wheel artifacts pick deterministically. Without
+            # this, selection depends on filesystem traversal order, which
+            # would let a tampered wheel slipped into a multi-wheel artifact
+            # win against the legitimate one on some hosts but not others.
+            # We can't fully defend against an attacker who has supplanted
+            # the upstream artifact, but adding ordering non-determinism
+            # on top of it would be strictly worse.
             wheel_files = sorted(extract_dir.glob("**/*.whl"))
             if not wheel_files:
                 raise GitHubArtifactError("No wheel file found in artifact")
@@ -931,7 +931,7 @@ class PluginDownloader:
                 response = requests.get(
                     bundle_url, stream=True, timeout=HTTP_TIMEOUT_SECONDS
                 )
-                _assert_all_https(response)
+                assert_all_https(response, exc_factory=InsecureSourceError)
                 response.raise_for_status()
 
                 _stream_to_file(response, bundle_path, MAX_BUNDLE_SIZE_BYTES)
