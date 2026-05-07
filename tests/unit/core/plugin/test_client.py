@@ -589,41 +589,12 @@ class TestDownloadPluginErrorPaths:
 
 
 class TestSecurityHelpers:
-    """Tests for module-level security helpers."""
+    """Tests for module-level security helpers.
 
-    def test_assert_all_https_rejects_http_redirect(self) -> None:
-        """A redirect chain through HTTP raises PluginAPIError."""
-        from ggshield.core.plugin.client import _assert_all_https
-
-        hop = MagicMock()
-        hop.url = "http://example.com/insecure"
-        response = MagicMock()
-        response.history = [hop]
-        response.url = "https://example.com/final"
-
-        with pytest.raises(PluginAPIError, match="insecure redirect"):
-            _assert_all_https(response)
-
-    def test_sanitize_wheel_filename_rejects_dotdot(self) -> None:
-        """A wheel filename equal to ``..`` is rejected before becoming a path."""
-        from ggshield.core.plugin.client import _sanitize_wheel_filename
-
-        with pytest.raises(PluginAPIError, match="unsafe filename"):
-            _sanitize_wheel_filename("..")
-
-    def test_sanitize_wheel_filename_rejects_embedded_null(self) -> None:
-        """A filename with NUL bytes is rejected."""
-        from ggshield.core.plugin.client import _sanitize_wheel_filename
-
-        with pytest.raises(PluginAPIError, match="unsafe filename"):
-            _sanitize_wheel_filename("ok\x00.whl")
-
-    def test_sanitize_wheel_filename_rejects_backslash(self) -> None:
-        """Backslash in filename is rejected (Windows path separator)."""
-        from ggshield.core.plugin.client import _sanitize_wheel_filename
-
-        with pytest.raises(PluginAPIError, match="unsafe filename"):
-            _sanitize_wheel_filename("evil\\path.whl")
+    Coverage for ``assert_all_https`` and ``sanitize_wheel_filename``
+    lives in ``test_http_security.py`` and ``test_wheel_utils.py``
+    respectively, since both helpers were extracted out of this module.
+    """
 
     def test_iter_with_size_cap_raises_on_overflow(self) -> None:
         """Total bytes exceeding the cap raise PluginAPIError mid-stream."""

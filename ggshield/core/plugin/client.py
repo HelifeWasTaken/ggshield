@@ -7,14 +7,18 @@ import re
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import PurePosixPath
 from typing import Any, Dict, Generator, Iterator, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
 from pygitguardian import GGClient
 
+from ggshield.core.plugin.http_security import assert_all_https
 from ggshield.core.plugin.platform import PlatformInfo, get_platform_info
+from ggshield.core.plugin.wheel_utils import (
+    InvalidWheelError,
+    sanitize_wheel_filename,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -23,26 +27,6 @@ logger = logging.getLogger(__name__)
 HTTP_TIMEOUT_SECONDS = 30
 MAX_WHEEL_SIZE_BYTES = 256 * 1024 * 1024
 MAX_BUNDLE_SIZE_BYTES = 1 * 1024 * 1024
-
-
-def _assert_all_https(response: "requests.Response") -> None:
-    """Reject a response whose redirect chain went through non-HTTPS."""
-    for hop in list(response.history) + [response]:
-        if not hop.url.startswith("https://"):
-            raise PluginAPIError(f"Refusing insecure redirect through {hop.url!r}")
-
-
-def _sanitize_wheel_filename(raw: str) -> str:
-    """Return a wheel filename safe to use as a single path segment.
-
-    Strips any path components the server may have included and rejects
-    values that would resolve outside the plugin directory (``..``, empty
-    segment, embedded NUL, trailing ``.whl`` missing).
-    """
-    name = PurePosixPath(raw).name
-    if not name or name in {".", ".."} or "\x00" in name or "\\" in name:
-        raise PluginAPIError(f"Server returned unsafe filename: {raw!r}")
-    return name
 
 
 def _iter_with_size_cap(
@@ -224,8 +208,6 @@ class PluginAPIClient:
             if response.status_code == 404:
                 raise PluginsNotEnabledError()
             response.raise_for_status()
-        except PluginsNotEnabledError:
-            raise
         except requests.RequestException as e:
             raise PluginAPIError(f"Failed to fetch plugins: {e}") from e
 
@@ -279,7 +261,7 @@ class PluginAPIClient:
                 stream=True,
                 timeout=HTTP_TIMEOUT_SECONDS,
             )
-            _assert_all_https(response)
+            assert_all_https(response, exc_factory=PluginAPIError)
             if response.status_code in (403, 404):
                 # Surface the server's `detail` (e.g. "No active release
                 # found for 'satori-python' version v0.32.0. Available
@@ -302,7 +284,10 @@ class PluginAPIClient:
             content_disposition = response.headers.get("Content-Disposition", "")
             match = re.search(r'filename="([^"]+)"', content_disposition)
             raw_filename = match.group(1) if match else f"{reference}.whl"
-            filename = _sanitize_wheel_filename(raw_filename)
+            try:
+                filename = sanitize_wheel_filename(raw_filename)
+            except InvalidWheelError as exc:
+                raise PluginAPIError(str(exc)) from exc
 
             sha256 = response.headers.get("X-Plugin-SHA256")
             if not sha256:
@@ -367,7 +352,7 @@ class PluginAPIClient:
             response = self.client.session.get(
                 signature_url, timeout=HTTP_TIMEOUT_SECONDS, stream=True
             )
-            _assert_all_https(response)
+            assert_all_https(response, exc_factory=PluginAPIError)
             response.raise_for_status()
 
             size_bytes = int(response.headers.get("Content-Length", 0))
