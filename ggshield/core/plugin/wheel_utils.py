@@ -5,7 +5,7 @@ Wheel utilities - extract metadata from wheel files.
 import email.parser
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 from zipfile import BadZipFile, ZipFile
 
@@ -120,3 +120,22 @@ def validate_wheel_file(wheel_path: Path) -> bool:
         return True
     except WheelError:
         return False
+
+
+def sanitize_wheel_filename(raw: str) -> str:
+    """Return a wheel filename safe to use as a single path segment.
+
+    Strips path components the server may have included and rejects
+    values that would resolve outside the plugin directory (``..``,
+    empty segment, embedded NUL, backslash). Requires a ``.whl``
+    suffix.
+
+    Raises:
+        InvalidWheelError: when the input doesn't satisfy the rules.
+    """
+    name = PurePosixPath(raw).name
+    if not name or name in {".", ".."} or "\x00" in name or "\\" in name:
+        raise InvalidWheelError(f"Server returned unsafe filename: {raw!r}")
+    if not name.endswith(".whl"):
+        raise InvalidWheelError(f"Wheel filename must end in .whl: {raw!r}")
+    return name
