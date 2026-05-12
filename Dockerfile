@@ -1,4 +1,4 @@
-FROM python:3.10-slim AS build
+FROM ghcr.io/gitguardian/wolfi/python:3.10-dev AS build
 
 LABEL maintainer="GitGuardian SRE Team <support@gitguardian.com>"
 
@@ -10,12 +10,10 @@ ENV PATH=/app/.venv/bin:$PATH
 
 WORKDIR /app
 
-RUN \
-    apt-get update \
-    && apt-get dist-upgrade -y --no-install-recommends \
-    && apt-get install -y --no-install-recommends git openssh-client \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk update \
+    && apk upgrade --no-cache \
+    && apk add --no-cache openssh-client \
+    && rm -rf /var/cache/apk/*
 
 COPY . .
 
@@ -24,4 +22,5 @@ RUN pip install .
 WORKDIR /data
 VOLUME [ "/data" ]
 
+ENTRYPOINT []
 CMD ["ggshield"]
